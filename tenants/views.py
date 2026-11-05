@@ -246,6 +246,18 @@ class TenantListView(APIView):
                 logins.get(tenant.parent_id, {}).get("OWNER") if tenant.parent_id else None
             )
 
+        # Setup review standing — a branch inherits its company's approval.
+        approved_setup = set(
+            SetupPayment.objects.filter(
+                tenant_id__in=lookup_ids, status="APPROVED"
+            ).values_list("tenant_id", flat=True)
+        )
+
+        def setup_ok(tenant):
+            if tenant.pk in approved_setup:
+                return True
+            return bool(tenant.parent_id) and tenant.parent_id in approved_setup
+
         payload = [
             {
                 **TenantSerializer(tenant).data,
@@ -258,6 +270,7 @@ class TenantListView(APIView):
                 "account_status": tenant.account_status,
                 "billing_state": tenant.billing_state,
                 "billing_hold": tenant.billing_hold,
+                "setup_approved": setup_ok(tenant),
                 "days_to_renewal": tenant.days_to_renewal,
                 "owner_username": owner_of(tenant),
                 "manager_username": logins.get(tenant.pk, {}).get("MANAGER"),
@@ -292,6 +305,16 @@ class TenantDetailView(APIView):
             .annotate(c=Count("id"))
         }
         thread = ChatThread.objects.filter(tenant=tenant).first()
+        # Yearly billing ledger standing: how many years are paid for, and
+        # whether the one-time setup fee cleared review (a branch inherits the
+        # company's approval, because the company is what signed up).
+        paid_years = (
+            tenant.subscription_payments.filter(status="APPROVED").aggregate(
+                years=Sum("years")
+            )["years"]
+            or 0
+        )
+        setup_holder = tenant.parent or tenant
         payload = {
             **TenantSerializer(tenant).data,
             "is_branch": tenant.parent_id is not None,
@@ -299,6 +322,10 @@ class TenantDetailView(APIView):
             # Yearly billing: the renewal falls due on the expiry date.
             # null = never paid (subscription_state UNPAID).
             "next_renewal_date": tenant.subscription_expires_on,
+            "paid_years": paid_years,
+            "setup_approved": setup_holder.setup_payments.filter(
+                status="APPROVED"
+            ).exists(),
             "counts": {
                 "staff": tenant.staff.count(),
                 "branches": tenant.branches.count(),
@@ -718,6 +745,12 @@ class AdminDashboardView(APIView):
                         free_trial_ends_on__lte=today + timedelta(days=5),
                     ).count(),
                     "overdue": due_overdue.count(),
+                    # Trials that ran out — the console's "expired trial" tile.
+                    "trial_expired": tenants.filter(
+                        free_trial_ends_on__lt=today,
+                        is_illustration=False,
+                        billing_hold=False,
+                    ).count(),
                     "open_threads": threads.filter(status="OPEN").count(),
                     "unread_messages": unread_messages.count(),
                     "threads_with_unread": threads.filter(

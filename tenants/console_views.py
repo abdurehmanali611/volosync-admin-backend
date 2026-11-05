@@ -161,6 +161,11 @@ def staff_row(profile):
         "role": profile.role,
         "tenant": profile.tenant.name if profile.tenant else "",
         "tenant_id": profile.tenant_id,
+        # The console's user watchlist and deep links key on the TIN, and the
+        # company/branch axis decides which filter tab a row belongs to.
+        "tin": profile.tenant.tin if profile.tenant else "",
+        "is_branch": bool(profile.tenant.parent_id) if profile.tenant else False,
+        "created_at": profile.created_at,
         "phone": profile.phone,
         "last_login": user.last_login,
         "must_change_password": profile.must_change_password,

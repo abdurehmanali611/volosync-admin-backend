@@ -298,9 +298,10 @@ class MonthlySignupsView(APIView):
                 | Q(tin__icontains=term)
                 | Q(parent__name__icontains=term)
             )
-        owner_tenant_ids = set(
-            Profile.objects.filter(role="OWNER").values_list("tenant_id", flat=True)
-        )
+        owner_names = {}
+        for profile in Profile.objects.filter(role="OWNER").select_related("user"):
+            owner_names[profile.tenant_id] = profile.user.username
+        owner_tenant_ids = set(owner_names)
         want_owner = (params.get("owner") or "").strip().lower()
         if want_owner == "missing":
             tenants = tenants.exclude(pk__in=owner_tenant_ids)
@@ -309,7 +310,11 @@ class MonthlySignupsView(APIView):
 
         rows = []
         for tenant in tenants.order_by("-created_at"):
-            payment = latest.get(tenant.pk)
+            # A branch is set up with its company, so fall back to the parent's
+            # setup submission when the branch has none of its own.
+            payment = latest.get(tenant.pk) or (
+                latest.get(tenant.parent_id) if tenant.parent_id else None
+            )
             rows.append(
                 {
                     "id": tenant.id,
@@ -321,6 +326,9 @@ class MonthlySignupsView(APIView):
                     "parent": tenant.parent.name if tenant.parent else "",
                     "phone": tenant.phone,
                     "owner_present": tenant.pk in owner_tenant_ids,
+                    "owner_username": owner_names.get(tenant.pk)
+                    or (owner_names.get(tenant.parent_id) if tenant.parent_id else "")
+                    or "",
                     "account_status": tenant.account_status,
                     "subscription_state": tenant.subscription_state,
                     "billing_state": tenant.billing_state,
@@ -329,6 +337,7 @@ class MonthlySignupsView(APIView):
                     "setup_status": payment.status if payment else "PENDING",
                     "setup_amount": str(payment.amount) if payment else None,
                     "setup_ref": payment.transaction_ref if payment else "",
+                    "setup_channel": payment.channel if payment else "",
                     "setup_submitted_by": payment.submitted_by.username
                     if payment and payment.submitted_by
                     else "",
