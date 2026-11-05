@@ -175,6 +175,8 @@ def kind_row(kind):
             }
             for column in spec["columns"]
         ],
+        "samples": spec["samples"],
+        "notes": spec["notes"],
     }
 
 

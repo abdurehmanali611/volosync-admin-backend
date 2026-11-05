@@ -219,6 +219,7 @@ class TenantListView(APIView):
                 "is_branch": tenant.parent_id is not None,
                 "parent_name": tenant.parent.name if tenant.parent else None,
                 "stock_value": str(stock_values.get(tenant.pk) or Decimal("0.00")),
+                "account_status": tenant.account_status,
                 "billing_state": tenant.billing_state,
                 "days_to_renewal": tenant.days_to_renewal,
             }
