@@ -4,8 +4,9 @@ from datetime import timedelta
 from decimal import Decimal, InvalidOperation
 
 from django.contrib.auth import get_user_model
-from django.db.models import Count, Sum
+from django.db.models import Count, F, Q, Sum
 from django.utils import timezone
+from django.utils.dateparse import parse_date
 from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -13,7 +14,17 @@ from rest_framework.views import APIView
 from inventory.models import StockLot
 from user.platform import require_platform_admin
 
-from .models import Feedback, ModuleRequest, SetupPayment, SubscriptionPayment, Tenant
+from .models import (
+    ChatMessage,
+    ChatThread,
+    Feedback,
+    ModuleRequest,
+    PlatformSalesAgent,
+    SetupPayment,
+    SubscriptionPayment,
+    Tenant,
+)
+from .platform_views import log, truthy
 from .pricing import suggest_annual_fee
 from .serializers import TenantSerializer
 from .services import (
@@ -73,9 +84,7 @@ class TenantListView(APIView):
         sales_agent = None
         agent_id = request.data.get("sales_agent")
         if agent_id not in (None, "", "null"):
-            from .models import PlatformSalesAgent as _Agent
-
-            sales_agent = _Agent.objects.filter(pk=agent_id).first()
+            sales_agent = PlatformSalesAgent.objects.filter(pk=agent_id).first()
             if not sales_agent:
                 return Response(
                     {"errors": {"message": "That sales agent does not exist."}}, status=400
@@ -90,9 +99,9 @@ class TenantListView(APIView):
             address=request.data.get("address", ""),
             logo_url=logo_url,
             vat_rate=request.data.get("vat_rate") or "15.00",
-            module_inventory=bool(request.data.get("module_inventory", True)),
-            module_hr=bool(request.data.get("module_hr", True)),
-            sales_role_enabled=bool(request.data.get("sales_role_enabled", False)),
+            module_inventory=truthy(request.data.get("module_inventory", True)),
+            module_hr=truthy(request.data.get("module_hr", True)),
+            sales_role_enabled=truthy(request.data.get("sales_role_enabled", False)),
             sales_agent=sales_agent,
             is_main=True,
             subscription_expires_on=timezone.localdate() + timedelta(days=365),
@@ -107,7 +116,6 @@ class TenantListView(APIView):
         # MANAGER: this credential opens the VoloSync manager portal. The OWNER
         # login is created separately from the tenant detail Owner tab.
         Profile.objects.create(user=manager, tenant=tenant, role="MANAGER")
-        from .platform_views import log
 
         log(request.user, "TENANT_CREATED", "tenant", tenant.pk, tenant.name)
         log(request.user, "MANAGER_CREATED", "user", manager.pk, tenant.name)
@@ -117,35 +125,106 @@ class TenantListView(APIView):
 
     @require_platform_admin
     def get(self, request):
-        tenants = Tenant.objects.select_related("sales_agent").annotate(
+        """Server-side console filters.
+
+        ?search= name/TIN/phone · ?state= ACTIVE|DUE_SOON|EXPIRED|UNPAID
+        ?access= ACTIVE|SUSPENDED|BANNED|DELETED · ?branch= true|false
+        ?sales_agent= <id>|none · ?module= INVENTORY|HR|SALES_ROLE
+        ?limit/offset — deleted wholesalers stay out unless asked for.
+        """
+        params = request.query_params
+        tenants = Tenant.objects.select_related("sales_agent", "parent").annotate(
             staff_count=Count("staff", distinct=True),
             branch_count=Count("branches", distinct=True),
             lot_count=Count("lots", distinct=True),
-        ).prefetch_related("branches")
-        agent_filter = request.query_params.get("sales_agent")
-        if agent_filter:
-            tenants = tenants.filter(sales_agent_id=agent_filter)
-        payload = []
-        for tenant in tenants:
-            payload.append(
-                {
-                    **TenantSerializer(tenant).data,
-                    "staff_count": tenant.staff_count,
-                    "branch_count": tenant.branch_count,
-                    "lot_count": tenant.lot_count,
-                    "is_branch": tenant.parent_id is not None,
-                    "stock_value": str(
-                        sum(
-                            (
-                                lot.remaining_quantity * lot.unit_cost
-                                for lot in StockLot.objects.filter(tenant=tenant)
-                            ),
-                            0,
-                        )
-                    ),
-                }
+        )
+        term = (params.get("search") or "").strip()
+        if term:
+            tenants = tenants.filter(
+                Q(name__icontains=term)
+                | Q(tin__icontains=term)
+                | Q(phone__icontains=term)
+                | Q(parent__name__icontains=term)
             )
-        return Response({"data": payload})
+        access = (params.get("access") or "").upper()
+        if access in dict(Tenant.ACCESS_STATES):
+            tenants = tenants.filter(account_status=access)
+        elif access != "DELETED":
+            tenants = tenants.exclude(account_status="DELETED")
+
+        state = (params.get("state") or "").upper()
+        today = timezone.localdate()
+        if state == "UNPAID":
+            tenants = tenants.filter(subscription_expires_on__isnull=True)
+        elif state == "EXPIRED":
+            tenants = tenants.filter(subscription_expires_on__lt=today)
+        elif state == "DUE_SOON":
+            tenants = tenants.filter(
+                subscription_expires_on__gte=today,
+                subscription_expires_on__lte=today + timedelta(days=30),
+            )
+        elif state == "ACTIVE":
+            tenants = tenants.filter(subscription_expires_on__gt=today + timedelta(days=30))
+
+        billing_state = (params.get("billing_state") or "").upper()
+        branch = (params.get("branch") or "").strip().lower()
+        if branch in ("1", "true", "yes"):
+            tenants = tenants.filter(parent__isnull=False)
+        elif branch in ("0", "false", "no"):
+            tenants = tenants.filter(parent__isnull=True)
+
+        agent = (params.get("sales_agent") or "").strip()
+        if agent == "none":
+            tenants = tenants.filter(sales_agent__isnull=True)
+        elif agent:
+            tenants = tenants.filter(sales_agent_id=agent)
+
+        module = (params.get("module") or "").upper()
+        if module == "INVENTORY":
+            tenants = tenants.filter(module_inventory=True)
+        elif module == "HR":
+            tenants = tenants.filter(module_hr=True)
+        elif module == "SALES_ROLE":
+            tenants = tenants.filter(sales_role_enabled=True)
+        elif module == "NONE":
+            tenants = tenants.filter(module_inventory=False, module_hr=False)
+
+        stock_values = {
+            row["tenant_id"]: row["value"]
+            for row in StockLot.objects.values("tenant_id").annotate(
+                value=Sum(F("remaining_quantity") * F("unit_cost"))
+            )
+        }
+        # `billing_state` is derived from illustration/hold/trial flags, so it
+        # narrows in python once every SQL filter has run.
+        rows = list(tenants)
+        if billing_state:
+            rows = [tenant for tenant in rows if tenant.billing_state == billing_state]
+
+        try:
+            limit = max(1, min(int(params.get("limit") or 500), 1000))
+            offset = max(0, int(params.get("offset") or 0))
+        except ValueError:
+            limit, offset = 500, 0
+
+        total = len(rows)
+        page = rows[offset : offset + limit]
+
+        payload = [
+            {
+                **TenantSerializer(tenant).data,
+                "staff_count": tenant.staff_count,
+                "branch_count": tenant.branch_count,
+                "lot_count": tenant.lot_count,
+                "is_branch": tenant.parent_id is not None,
+                "parent_name": tenant.parent.name if tenant.parent else None,
+                "stock_value": str(stock_values.get(tenant.pk) or Decimal("0.00")),
+                "billing_state": tenant.billing_state,
+                "days_to_renewal": tenant.days_to_renewal,
+            }
+            for tenant in page
+        ]
+        return Response({"data": payload, "meta": {"total": total, "limit": limit, "offset": offset}})
 
 
 class TenantDetailView(APIView):
@@ -153,15 +232,25 @@ class TenantDetailView(APIView):
 
     @require_platform_admin
     def get(self, request, pk):
+        """The whole detail page in one payload (the console's tab shell)."""
         tenant = Tenant.objects.filter(pk=pk).first()
         if not tenant:
             return Response({"errors": {"message": "Not found."}}, status=404)
+        from .console_views import access_payload, billing_payload, module_flags
+        from user.models import Profile
+
         lots = StockLot.objects.filter(tenant=tenant)
         stock_value = sum(
             (lot.remaining_quantity * lot.unit_cost for lot in lots),
             Decimal("0.00"),
         )
-        suggested = suggest_annual_fee(tenant)
+        roles = {
+            row["role"]: row["c"]
+            for row in Profile.objects.filter(tenant=tenant)
+            .values("role")
+            .annotate(c=Count("id"))
+        }
+        thread = ChatThread.objects.filter(tenant=tenant).first()
         payload = {
             **TenantSerializer(tenant).data,
             "is_branch": tenant.parent_id is not None,
@@ -169,7 +258,6 @@ class TenantDetailView(APIView):
             # Yearly billing: the renewal falls due on the expiry date.
             # null = never paid (subscription_state UNPAID).
             "next_renewal_date": tenant.subscription_expires_on,
-            "suggested_annual_fee": str(suggested) if suggested is not None else None,
             "counts": {
                 "staff": tenant.staff.count(),
                 "branches": tenant.branches.count(),
@@ -177,9 +265,25 @@ class TenantDetailView(APIView):
                 "payments": tenant.subscription_payments.count(),
                 "setup_payments": tenant.setup_payments.count(),
                 "module_requests": tenant.module_requests.count(),
+                "roles": roles,
             },
             "stock_value": str(stock_value),
+            "owner_present": bool(roles.get("OWNER")),
+            "chat": {
+                "thread": thread.id if thread else None,
+                "status": thread.status if thread else None,
+                "subject": thread.subject if thread else "",
+                "unread_for_apex": thread.messages.filter(
+                    side="TENANT", read_by_apex=False
+                ).count()
+                if thread
+                else 0,
+                "messages": thread.messages.count() if thread else 0,
+            },
         }
+        payload.update(access_payload(tenant))
+        payload.update(billing_payload(tenant))
+        payload["modules"] = module_flags(tenant)["modules"]
         return Response({"data": payload})
 
     @require_platform_admin
@@ -196,41 +300,64 @@ class TenantDetailView(APIView):
         tenant = Tenant.objects.filter(pk=pk).first()
         if not tenant:
             return Response({"errors": {"message": "Not found."}}, status=404)
-        allowed = [
-            "name",
-            "phone",
-            "address",
-            "logo_url",
-            "vat_rate",
-            "module_inventory",
-            "module_hr",
-            "sales_role_enabled",
-            "subscription_expires_on",
-            "annual_fee",
-            "subscription_note",
-            "sales_agent",
-        ]
+
+        def bad(message):
+            return Response({"errors": {"message": message}}, status=400)
+
+        for field in ("name", "phone", "address", "logo_url", "subscription_note"):
+            if field in request.data:
+                setattr(tenant, field, str(request.data[field] or "").strip())
+        logo_url = str(request.data.get("logo_url") or "").strip()
+        if logo_url and not logo_url.startswith(("https://", "http://")):
+            return bad("The logo must be an uploaded image URL.")
+
+        for field in ("module_inventory", "module_hr", "sales_role_enabled"):
+            if field in request.data:
+                setattr(tenant, field, truthy(request.data[field]))
+
+        if "vat_rate" in request.data:
+            try:
+                tenant.vat_rate = Decimal(str(request.data["vat_rate"] or "0"))
+            except InvalidOperation:
+                return bad("vat_rate must be a number.")
+
         if "annual_fee" in request.data:
             try:
                 tenant.annual_fee = Decimal(str(request.data["annual_fee"] or "0"))
             except InvalidOperation:
-                return Response(
-                    {"errors": {"message": "annual_fee must be a number."}}, status=400
-                )
-        for field in allowed:
-            if field in request.data and field != "annual_fee":
-                setattr(tenant, field, request.data[field])
+                return bad("annual_fee must be a number.")
+            # A typed-in fee stops the catalog from repricing this tenant.
+            tenant.fees_manually_set = True
+
+        if "subscription_expires_on" in request.data:
+            raw = str(request.data["subscription_expires_on"] or "").strip()
+            if raw in ("", "null"):
+                tenant.subscription_expires_on = None
+            else:
+                expires_on = parse_date(raw[:10])
+                if expires_on is None:
+                    return bad("subscription_expires_on must be a YYYY-MM-DD date.")
+                tenant.subscription_expires_on = expires_on
+
+        if "sales_agent" in request.data:
+            agent_id = str(request.data["sales_agent"] or "").strip()
+            if agent_id in ("", "null"):
+                tenant.sales_agent = None
+            else:
+                tenant.sales_agent = PlatformSalesAgent.objects.filter(pk=agent_id).first()
+                if tenant.sales_agent is None:
+                    return bad("That sales agent does not exist.")
+
         tenant.save()
 
         suggested = suggest_annual_fee(tenant)
-        apply_fee = str(request.data.get("apply_fee", "")).lower() in ("1", "true", "yes")
+        apply_fee = truthy(request.data.get("apply_fee", False))
         fee_applied = False
         if apply_fee and suggested is not None:
             tenant.annual_fee = suggested
-            tenant.save(update_fields=["annual_fee"])
+            tenant.fees_manually_set = False
+            tenant.save(update_fields=["annual_fee", "fees_manually_set"])
             fee_applied = True
-
-        from .platform_views import log
 
         detail = str(sorted(request.data))
         if fee_applied:
@@ -269,31 +396,29 @@ class TenantStaffView(APIView):
         tenant = Tenant.objects.filter(pk=pk).first()
         if not tenant:
             return Response({"errors": {"message": "Not found."}}, status=404)
+        from .console_views import staff_row
         from user.models import Profile
 
         profiles = (
             Profile.objects.filter(tenant=tenant)
-            .select_related("user")
+            .select_related("user", "tenant", "login_disabled_by")
             .order_by("role", "user__username")
         )
-        return Response(
-            {
-                "data": [
-                    {
-                        "id": profile.user_id,
-                        "profile_id": profile.id,
-                        "username": profile.user.username,
-                        "name": profile.user.get_full_name() or profile.user.username,
-                        "role": profile.role,
-                        "phone": profile.phone,
-                        "last_login": profile.user.last_login,
-                        "must_change_password": profile.must_change_password,
-                        "is_active": profile.user.is_active,
-                    }
-                    for profile in profiles
-                ]
-            }
-        )
+        term = (request.query_params.get("search") or "").strip()
+        if term:
+            profiles = profiles.filter(
+                Q(user__username__icontains=term)
+                | Q(user__first_name__icontains=term)
+                | Q(user__last_name__icontains=term)
+                | Q(phone__icontains=term)
+            )
+        role = (request.query_params.get("role") or "").upper()
+        if role:
+            profiles = profiles.filter(role=role)
+        rows = [staff_row(profile) for profile in profiles]
+        if (request.query_params.get("disabled") or "").lower() in ("1", "true", "yes"):
+            rows = [row for row in rows if row["login_disabled"]]
+        return Response({"data": rows, "meta": {"total": len(rows)}})
 
 
 class StaffResetPasswordView(APIView):
@@ -324,7 +449,6 @@ class StaffResetPasswordView(APIView):
         target.set_password(password)
         target.save(update_fields=["password"])
 
-        from .platform_views import log
 
         log(
             request.user,
@@ -408,7 +532,6 @@ class TenantOwnerView(APIView):
             )
         user = User.objects.create_user(username=username, password=password, email=email)
         Profile.objects.create(user=user, tenant=tenant, role="OWNER")
-        from .platform_views import log
 
         log(request.user, "OWNER_CREATED", "user", user.pk, username)
         return Response({"data": _owner_payload(user)}, status=201)
@@ -448,7 +571,6 @@ class TenantOwnerView(APIView):
                 {"errors": {"message": "Nothing to update."}}, status=400
             )
         owner.save(update_fields=updated)
-        from .platform_views import log
 
         log(
             request.user,
@@ -478,9 +600,12 @@ class AdminDashboardView(APIView):
 
     @require_platform_admin
     def get(self, request):
+        from .console_views import status_counts
+        from user.models import Profile
+
         today = timezone.localdate()
         tenants = Tenant.objects.all()
-        companies = tenants.filter(parent__isnull=True)
+        companies = tenants.filter(parent__isnull=True).exclude(account_status="DELETED")
         soon = today + timedelta(days=30)
         payments = SubscriptionPayment.objects.all()
         year_start = today.replace(month=1, day=1)
@@ -494,6 +619,12 @@ class AdminDashboardView(APIView):
             ),
             Decimal("0.00"),
         )
+        owner_tenant_ids = set(
+            Profile.objects.filter(role="OWNER").values_list("tenant_id", flat=True)
+        )
+        threads = ChatThread.objects.all()
+        unread_messages = ChatMessage.objects.filter(side="TENANT", read_by_apex=False)
+        due_overdue = companies.filter(subscription_expires_on__lt=today)
         return Response(
             {
                 "data": {
@@ -522,6 +653,32 @@ class AdminDashboardView(APIView):
                         status="PENDING"
                     ).count(),
                     "unread_feedback": Feedback.objects.filter(unread=True).count(),
+                    # --- console health (the header pill + queue tiles) -----
+                    "suspended": tenants.filter(account_status="SUSPENDED").count(),
+                    "banned": tenants.filter(account_status="BANNED").count(),
+                    "deleted": tenants.filter(account_status="DELETED").count(),
+                    "without_owner": companies.exclude(
+                        pk__in=owner_tenant_ids
+                    ).count(),
+                    "logins_disabled": Profile.objects.filter(
+                        login_disabled=True
+                    ).count(),
+                    "illustrations": tenants.filter(is_illustration=True).count(),
+                    "on_billing_hold": tenants.filter(billing_hold=True).count(),
+                    "trial_ending": tenants.filter(
+                        free_trial_ends_on__gte=today,
+                        free_trial_ends_on__lte=today + timedelta(days=5),
+                    ).count(),
+                    "overdue": due_overdue.count(),
+                    "open_threads": threads.filter(status="OPEN").count(),
+                    "unread_messages": unread_messages.count(),
+                    "threads_with_unread": threads.filter(
+                        messages__side="TENANT", messages__read_by_apex=False
+                    ).distinct().count(),
+                    "new_this_month": tenants.filter(
+                        created_at__date__gte=today.replace(day=1)
+                    ).count(),
+                    "subscription_statuses": status_counts(payments),
                 }
             }
         )
@@ -542,12 +699,34 @@ class SubscriptionListCreateView(APIView):
 
     @require_platform_admin
     def get(self, request):
-        rows = (
-            SubscriptionPayment.objects.select_related(
-                "tenant", "recorded_by", "submitted_by", "decided_by"
-            )[:200]
+        params = request.query_params
+        rows = SubscriptionPayment.objects.select_related(
+            "tenant", "recorded_by", "submitted_by", "decided_by"
         )
-        return Response({"data": [payment_row(row) for row in rows]})
+        status_filter = (params.get("status") or "").upper()
+        if status_filter in {"PENDING", "APPROVED", "REJECTED"}:
+            rows = rows.filter(status=status_filter)
+        channel = (params.get("channel") or "").upper()
+        if channel in {"TELEBIRR", "BANK", "CASH", "OTHER"}:
+            rows = rows.filter(channel=channel)
+        tenant_id = (params.get("tenant") or "").strip()
+        if tenant_id:
+            rows = rows.filter(tenant_id=tenant_id)
+        term = (params.get("search") or "").strip()
+        if term:
+            rows = rows.filter(
+                Q(transaction_id__icontains=term) | Q(tenant__name__icontains=term)
+            )
+        try:
+            limit = max(1, min(int(params.get("limit") or 200), 500))
+            offset = max(0, int(params.get("offset") or 0))
+        except ValueError:
+            limit, offset = 200, 0
+        total = rows.count()
+        rows = rows.order_by("-created_at", "-id")[offset : offset + limit]
+        return Response(
+            {"data": [payment_row(row) for row in rows], "meta": {"total": total}}
+        )
 
     @require_platform_admin
     def post(self, request):
@@ -580,7 +759,6 @@ class SubscriptionListCreateView(APIView):
         covers_until = payment.covers_until
         if approved_now:
             covers_until = approve_subscription(payment, request.user, note=note)
-            from .platform_views import log
 
             log(
                 request.user,
@@ -590,7 +768,6 @@ class SubscriptionListCreateView(APIView):
                 transaction_id,
             )
         else:
-            from .platform_views import log
 
             log(
                 request.user,
@@ -615,37 +792,44 @@ class SubscriptionListCreateView(APIView):
 class StaffListView(APIView):
     """Every platform account, grouped by tenant and role.
 
-    `id` is the USER id (the reset-password endpoint targets it);
-    `profile_id` is kept for reference.
+    `id` is the USER id (the reset-password and login-toggle endpoints target
+    it); `profile_id` is kept for reference.
+
+    ?search= username/name/phone/tenant · ?role= STORE|FINANCE|MANAGER|HR|
+    SALES|OWNER · ?tenant= <id> · ?disabled= true
     """
 
     @require_platform_admin
     def get(self, request):
+        from .console_views import staff_row
         from user.models import Profile
 
-        profiles = Profile.objects.select_related("user", "tenant").order_by(
-            "tenant__name", "role"
-        )
-        return Response(
-            {
-                "data": [
-                    {
-                        "id": profile.user_id,
-                        "profile_id": profile.id,
-                        "username": profile.user.username,
-                        "name": profile.user.get_full_name() or profile.user.username,
-                        "role": profile.role,
-                        "tenant": profile.tenant.name if profile.tenant else "",
-                        "tenant_id": profile.tenant_id,
-                        "phone": profile.phone,
-                        "last_login": profile.user.last_login,
-                        "must_change_password": profile.must_change_password,
-                        "is_active": profile.user.is_active,
-                    }
-                    for profile in profiles
-                ]
-            }
-        )
+        profiles = Profile.objects.select_related(
+            "user", "tenant", "login_disabled_by"
+        ).order_by("tenant__name", "role")
+        params = request.query_params
+        term = (params.get("search") or "").strip()
+        if term:
+            profiles = profiles.filter(
+                Q(user__username__icontains=term)
+                | Q(user__first_name__icontains=term)
+                | Q(user__last_name__icontains=term)
+                | Q(user__email__icontains=term)
+                | Q(phone__icontains=term)
+                | Q(tenant__name__icontains=term)
+            )
+        role = (params.get("role") or "").upper()
+        if role:
+            profiles = profiles.filter(role=role)
+        tenant_id = (params.get("tenant") or "").strip()
+        if tenant_id == "none":
+            profiles = profiles.filter(tenant__isnull=True)
+        elif tenant_id:
+            profiles = profiles.filter(tenant_id=tenant_id)
+        rows = [staff_row(profile) for profile in profiles]
+        if (params.get("disabled") or "").lower() in ("1", "true", "yes"):
+            rows = [row for row in rows if row["login_disabled"]]
+        return Response({"data": rows, "meta": {"total": len(rows)}})
 
 
 class BranchCreateView(APIView):
@@ -724,7 +908,6 @@ class BranchCreateView(APIView):
 
             Profile.objects.create(user=user, tenant=branch, role="MANAGER")
 
-        from .platform_views import log
 
         log(request.user, "BRANCH_CREATED", "tenant", branch.pk, branch.name)
         return Response({"data": TenantSerializer(branch).data}, status=201)

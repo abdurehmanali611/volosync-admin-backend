@@ -9,6 +9,13 @@ class Tenant(models.Model):
     # Credentials is always-on (basic), never a billable/requestable module.
     REQUIRED_MODULES = ("CREDENTIALS",)
 
+    ACCESS_STATES = (
+        ("ACTIVE", "Active"),
+        ("SUSPENDED", "Suspended"),
+        ("BANNED", "Banned"),
+        ("DELETED", "Deleted"),
+    )
+
     name = models.CharField(max_length=255)
     tin = models.CharField(max_length=50, unique=True)
     phone = models.CharField(max_length=40, blank=True)
@@ -36,6 +43,51 @@ class Tenant(models.Model):
     annual_fee = models.DecimalField(
         max_digits=14, decimal_places=2, default=Decimal("0.00")
     )
+    # --- Access control (Apex console) -------------------------------------
+    # Each state keeps its own reason/actor/timestamp trail so the Access tab
+    # can show why a wholesaler was restricted, not just that it was.
+    account_status = models.CharField(
+        max_length=20, choices=ACCESS_STATES, default="ACTIVE"
+    )
+    suspended_reason = models.CharField(max_length=255, blank=True)
+    suspended_at = models.DateTimeField(null=True, blank=True)
+    suspended_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="tenants_suspended",
+    )
+    banned_reason = models.CharField(max_length=255, blank=True)
+    banned_at = models.DateTimeField(null=True, blank=True)
+    banned_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="tenants_banned",
+    )
+    deleted_reason = models.CharField(max_length=255, blank=True)
+    deleted_at = models.DateTimeField(null=True, blank=True)
+    deleted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="tenants_deleted",
+    )
+    # --- Billing state (yearly only) ---------------------------------------
+    # An illustration tenant is a showcase account: it is never billed and
+    # never sits in a payment queue. A billing hold freezes renewals without
+    # revoking access — that is what distinguishes it from suspension.
+    is_illustration = models.BooleanField(default=False)
+    billing_hold = models.BooleanField(default=False)
+    billing_hold_note = models.CharField(max_length=255, blank=True)
+    billing_hold_set_at = models.DateTimeField(null=True, blank=True)
+    free_trial_ends_on = models.DateField(null=True, blank=True)
+    # Set when an operator types a fee by hand; auto-recalculation from the
+    # pricing catalog then stops unless the fee is applied explicitly.
+    fees_manually_set = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -60,6 +112,54 @@ class Tenant(models.Model):
         if days <= 30:
             return "DUE_SOON"
         return "ACTIVE"
+
+    @property
+    def is_restricted(self):
+        """Anything other than ACTIVE hides the wholesaler from its own app."""
+        return self.account_status != "ACTIVE"
+
+    @property
+    def days_to_renewal(self):
+        from django.utils import timezone
+
+        if not self.subscription_expires_on:
+            return None
+        return (self.subscription_expires_on - timezone.localdate()).days
+
+    @property
+    def trial_days_left(self):
+        from django.utils import timezone
+
+        if not self.free_trial_ends_on:
+            return None
+        return (self.free_trial_ends_on - timezone.localdate()).days
+
+    @property
+    def billing_state(self):
+        """The renewal standing the console's billing tiles report.
+
+        Kept separate from `subscription_state` (which the older pages read):
+        this one also understands illustration accounts, holds and free trials.
+        A zero annual_fee is a price, not an exemption — only illustration
+        accounts are EXEMPT, so a hold or a trial stays visible on them.
+        """
+        from django.utils import timezone
+
+        if self.is_illustration:
+            return "EXEMPT"
+        if self.billing_hold:
+            return "ON_HOLD"
+        if self.free_trial_ends_on:
+            left = (self.free_trial_ends_on - timezone.localdate()).days
+            if left < 0:
+                return "TRIAL_EXPIRED"
+            return "TRIAL_ENDING" if left <= 5 else "TRIAL"
+        days = self.days_to_renewal
+        if days is None:
+            return "UNPAID"
+        if days < 0:
+            return "EXPIRED" if days <= -10 else "GRACE"
+        return "ACTIVE" if days > 30 else "DUE_SOON"
 
 
 class SubscriptionPayment(models.Model):
@@ -157,6 +257,9 @@ class AuditLog(models.Model):
     target_type = models.CharField(max_length=40, blank=True)
     target_id = models.CharField(max_length=40, blank=True)
     detail = models.CharField(max_length=255, blank=True)
+    # Restriction and rejection reasons are quoted verbatim in the audit table;
+    # `detail` stays the human-readable target label.
+    reason = models.TextField(blank=True)
     at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -179,6 +282,16 @@ class SetupPayment(models.Model):
     channel = models.CharField(max_length=40, blank=True)
     status = models.CharField(max_length=20, choices=STATUS, default="PENDING")
     note = models.CharField(max_length=255, blank=True)
+    # Who filed the receipt. Self-signup rows are created by the manager's own
+    # login; an operator-entered row is attributed the same way.
+    submitted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="setup_payment_submissions",
+    )
+    submitted_at = models.DateTimeField(null=True, blank=True)
     decided_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         null=True,
@@ -206,8 +319,22 @@ class ModuleRequest(models.Model):
         Tenant, on_delete=models.CASCADE, related_name="module_requests"
     )
     requested_modules = models.CharField(max_length=120)
+    # What the tenant had switched on when the request arrived — the review
+    # sheet shows current vs requested vs the projected yearly fee.
+    current_modules = models.CharField(max_length=120, blank=True)
     note = models.CharField(max_length=255, blank=True)
     status = models.CharField(max_length=20, choices=STATUS, default="PENDING")
+    projected_annual_fee = models.DecimalField(
+        max_digits=14, decimal_places=2, null=True, blank=True
+    )
+    review_note = models.CharField(max_length=255, blank=True)
+    decided_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="module_request_decisions",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     decided_at = models.DateTimeField(null=True, blank=True)
 
@@ -233,12 +360,14 @@ class PricingPlan(models.Model):
     inventory_yearly_fee = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal("0.00"))
     hr_yearly_fee = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal("0.00"))
     sales_role_yearly_fee = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal("0.00"))
+    description = models.CharField(max_length=255, blank=True)
+    sort_order = models.PositiveIntegerField(default=0)
     is_default = models.BooleanField(default=False)
     active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        ordering = ["-is_default", "name"]
+        ordering = ["-is_default", "sort_order", "name"]
 
     def __str__(self):
         return self.name
@@ -260,3 +389,68 @@ class PlatformSalesAgent(models.Model):
 
     def __str__(self):
         return self.name
+
+
+class ChatThread(models.Model):
+    """The one running conversation Apex has with a wholesaler.
+
+    `Feedback` above stays the inbound suggestion box the VoloSync app posts
+    into; this is the two-way channel, so a tenant always has at most one
+    thread and re-opening a closed one keeps the history.
+    """
+
+    STATUS = (("OPEN", "Open"), ("CLOSED", "Closed"))
+
+    tenant = models.OneToOneField(
+        Tenant, on_delete=models.CASCADE, related_name="chat_thread"
+    )
+    status = models.CharField(max_length=20, choices=STATUS, default="OPEN")
+    subject = models.CharField(max_length=200, blank=True)
+    opened_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="chat_threads_opened",
+    )
+    closed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="chat_threads_closed",
+    )
+    closed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+
+    def __str__(self):
+        return f"chat · {self.tenant.name}"
+
+
+class ChatMessage(models.Model):
+    """One bubble in a chat thread, from either side."""
+
+    SIDES = (("APEX", "Apex"), ("TENANT", "Wholesaler"))
+
+    thread = models.ForeignKey(
+        ChatThread, on_delete=models.CASCADE, related_name="messages"
+    )
+    side = models.CharField(max_length=10, choices=SIDES)
+    body = models.TextField(blank=True)
+    image_url = models.CharField(max_length=2048, blank=True)
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL
+    )
+    read_by_apex = models.BooleanField(default=False)
+    read_by_tenant = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at", "id"]
+
+    def __str__(self):
+        return f"{self.side} · {self.thread_id}"

@@ -138,7 +138,21 @@ class SubscriptionDecisionView(APIView):
                 {"errors": {"message": "decision must be APPROVED or REJECTED."}},
                 status=400,
             )
-        note = request.data.get("note", "")
+        note = (
+            request.data.get("note")
+            or request.data.get("decision_note")
+            or request.data.get("reason")
+            or ""
+        ).strip()
+        if decision == "REJECTED" and len(note) < 4:
+            return Response(
+                {
+                    "errors": {
+                        "message": "Explain the rejection — the wholesaler sees this note."
+                    }
+                },
+                status=400,
+            )
         if decision == "APPROVED":
             covers_until = approve_subscription(payment, request.user, note)
             action = "SUBSCRIPTION_APPROVED"
@@ -146,7 +160,14 @@ class SubscriptionDecisionView(APIView):
             reject_subscription(payment, request.user, note)
             covers_until = payment.covers_until
             action = "SUBSCRIPTION_REJECTED"
-        log(request.user, action, "subscription_payment", payment.pk, payment.transaction_id)
+        log(
+            request.user,
+            action,
+            "subscription_payment",
+            payment.pk,
+            payment.transaction_id,
+            reason=note,
+        )
         return Response(
             {
                 "data": {
@@ -203,6 +224,8 @@ class SetupPaymentSubmitView(APIView):
             channel=channel,
             status="PENDING",
             note=request.data.get("note", ""),
+            submitted_by=request.user if request.user.is_authenticated else None,
+            submitted_at=timezone.now(),
         )
         log(request.user, "SETUP_SUBMITTED", "setup_payment", row.pk, tenant.name)
         return Response({"data": setup_payment_row(row)}, status=201)
