@@ -125,7 +125,12 @@ class SubscriptionDecisionView(APIView):
 
     @require_platform_admin
     def patch(self, request, pk):
-        payment = SubscriptionPayment.objects.select_related("tenant").filter(pk=pk).first()
+        payment = SubscriptionPayment.objects.select_related(
+            "tenant",
+            "tenant__sales_agent",
+            "tenant__parent",
+            "tenant__parent__sales_agent",
+        ).filter(pk=pk).first()
         if payment is None:
             return Response({"errors": {"message": "Not found."}}, status=404)
         if payment.status != "PENDING":

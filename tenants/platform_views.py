@@ -20,6 +20,7 @@ from .models import (
 )
 from .pricing import default_plan
 from .serializers import PricingPlanSerializer
+from .services import tenant_sales_agent_name
 
 CHANNELS = {"TELEBIRR", "BANK", "CASH", "OTHER"}
 
@@ -84,6 +85,8 @@ def setup_payment_row(row):
         "id": row.id,
         "tenant": row.tenant.name,
         "tenant_id": row.tenant_id,
+        "tin": row.tenant.tin,
+        "sales_agent_name": tenant_sales_agent_name(row.tenant),
         "amount": str(row.amount.quantize(Decimal("0.01"))),
         "transaction_ref": row.transaction_ref,
         "channel": row.channel,
@@ -322,6 +325,7 @@ class MonthlySignupsView(APIView):
                     "subscription_state": tenant.subscription_state,
                     "billing_state": tenant.billing_state,
                     "annual_fee": str(tenant.annual_fee),
+                    "setup_payment_id": payment.id if payment else None,
                     "setup_status": payment.status if payment else "PENDING",
                     "setup_amount": str(payment.amount) if payment else None,
                     "setup_ref": payment.transaction_ref if payment else "",
@@ -353,12 +357,23 @@ class SetupPaymentListView(APIView):
 
     @require_platform_admin
     def get(self, request):
-        rows = SetupPayment.objects.select_related(
-            "tenant", "submitted_by", "decided_by"
+        rows = (
+            SetupPayment.objects.select_related(
+                "tenant",
+                "tenant__sales_agent",
+                "tenant__parent",
+                "tenant__parent__sales_agent",
+                "submitted_by",
+                "decided_by",
+            )
+            .order_by("-created_at", "-id")
         )
         status_filter = (request.query_params.get("status") or "").upper()
         if status_filter in {"PENDING", "APPROVED", "REJECTED"}:
             rows = rows.filter(status=status_filter)
+        tenant_id = (request.query_params.get("tenant") or "").strip()
+        if tenant_id.isdigit():
+            rows = rows.filter(tenant_id=int(tenant_id))
         term = (request.query_params.get("search") or "").strip()
         if term:
             rows = rows.filter(
@@ -379,7 +394,16 @@ class SetupPaymentListView(APIView):
         Approving a setup payment only records the fee — tenant activation is
         not tied to it.
         """
-        row = SetupPayment.objects.filter(pk=request.data.get("id")).first()
+        row = (
+            SetupPayment.objects.select_related(
+                "tenant",
+                "tenant__sales_agent",
+                "tenant__parent",
+                "tenant__parent__sales_agent",
+            )
+            .filter(pk=request.data.get("id"))
+            .first()
+        )
         if row is None:
             return Response({"errors": {"message": "Not found."}}, status=404)
         if row.status != "PENDING":
@@ -459,10 +483,15 @@ class ModuleRequestListView(APIView):
 
     @require_platform_admin
     def get(self, request):
-        rows = ModuleRequest.objects.select_related("tenant", "decided_by")
+        rows = ModuleRequest.objects.select_related(
+            "tenant", "decided_by"
+        ).order_by("-created_at", "-id")
         status_filter = (request.query_params.get("status") or "").upper()
         if status_filter in {"PENDING", "APPROVED", "REJECTED"}:
             rows = rows.filter(status=status_filter)
+        tenant_id = (request.query_params.get("tenant") or "").strip()
+        if tenant_id.isdigit():
+            rows = rows.filter(tenant_id=int(tenant_id))
         term = (request.query_params.get("search") or "").strip()
         if term:
             rows = rows.filter(
@@ -620,6 +649,7 @@ class PricingPlanListCreateView(APIView):
                 PricingPlan.objects.filter(is_default=True).update(is_default=False)
             plan = PricingPlan.objects.create(
                 name=name,
+                description=(request.data.get("description") or "").strip()[:255],
                 is_default=is_default,
                 active=active,
                 **fees,
@@ -657,6 +687,8 @@ class PricingPlanDetailView(APIView):
             return Response({"errors": {"message": error}}, status=400)
         for key, value in fees.items():
             setattr(plan, key, value)
+        if "description" in request.data:
+            plan.description = (request.data.get("description") or "").strip()[:255]
         if "active" in request.data:
             plan.active = (
                 request.data["active"]

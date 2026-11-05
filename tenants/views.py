@@ -128,7 +128,7 @@ class TenantListView(APIView):
         """Server-side console filters.
 
         ?search= name/TIN/phone · ?state= ACTIVE|DUE_SOON|EXPIRED|UNPAID
-        ?access= ACTIVE|SUSPENDED|BANNED|DELETED · ?branch= true|false
+        ?access= ACTIVE|SUSPENDED|BANNED|DELETED|INACTIVE · ?branch= true|false
         ?sales_agent= <id>|none · ?module= INVENTORY|HR|SALES_ROLE
         ?limit/offset — deleted wholesalers stay out unless asked for.
         """
@@ -147,7 +147,12 @@ class TenantListView(APIView):
                 | Q(parent__name__icontains=term)
             )
         access = (params.get("access") or "").upper()
-        if access in dict(Tenant.ACCESS_STATES):
+        if access == "INACTIVE":
+            # The restricted watchlist: everything that cannot open its app.
+            tenants = tenants.filter(
+                account_status__in=("SUSPENDED", "BANNED", "DELETED")
+            )
+        elif access in dict(Tenant.ACCESS_STATES):
             tenants = tenants.filter(account_status=access)
         elif access != "DELETED":
             tenants = tenants.exclude(account_status="DELETED")
@@ -210,6 +215,37 @@ class TenantListView(APIView):
         total = len(rows)
         page = rows[offset : offset + limit]
 
+        # Three per-page joins the list columns need: who can sign in, and
+        # whether that wholesaler is waiting on an unread reply.
+        from user.models import Profile
+
+        page_ids = [tenant.pk for tenant in page]
+        lookup_ids = set(page_ids) | {
+            tenant.parent_id for tenant in page if tenant.parent_id
+        }
+        logins: dict[int, dict[str, str]] = {}
+        for profile in (
+            Profile.objects.filter(
+                tenant_id__in=lookup_ids, role__in=("OWNER", "MANAGER")
+            )
+            .select_related("user")
+        ):
+            logins.setdefault(profile.tenant_id, {})[profile.role] = profile.user.username
+        unread = {
+            row["thread__tenant_id"]: row["c"]
+            for row in ChatMessage.objects.filter(
+                thread__tenant_id__in=page_ids, side="TENANT", read_by_apex=False
+            ).values("thread__tenant_id").annotate(c=Count("id"))
+        }
+
+        def owner_of(tenant):
+            # A branch is signed into by its company's owner login, so the list
+            # shows the parent's owner instead of an empty cell.
+            own = logins.get(tenant.pk, {}).get("OWNER")
+            return own or (
+                logins.get(tenant.parent_id, {}).get("OWNER") if tenant.parent_id else None
+            )
+
         payload = [
             {
                 **TenantSerializer(tenant).data,
@@ -221,7 +257,11 @@ class TenantListView(APIView):
                 "stock_value": str(stock_values.get(tenant.pk) or Decimal("0.00")),
                 "account_status": tenant.account_status,
                 "billing_state": tenant.billing_state,
+                "billing_hold": tenant.billing_hold,
                 "days_to_renewal": tenant.days_to_renewal,
+                "owner_username": owner_of(tenant),
+                "manager_username": logins.get(tenant.pk, {}).get("MANAGER"),
+                "unread_chat": unread.get(tenant.pk, 0),
             }
             for tenant in page
         ]
@@ -383,7 +423,15 @@ class TenantPaymentsView(APIView):
             return Response({"errors": {"message": "Not found."}}, status=404)
         rows = (
             SubscriptionPayment.objects.filter(tenant=tenant)
-            .select_related("tenant", "submitted_by", "decided_by", "recorded_by")
+            .select_related(
+                "tenant",
+                "tenant__sales_agent",
+                "tenant__parent",
+                "tenant__parent__sales_agent",
+                "submitted_by",
+                "decided_by",
+                "recorded_by",
+            )
             .order_by("-paid_on", "-id")
         )
         return Response({"data": [payment_row(row) for row in rows]})
@@ -449,7 +497,6 @@ class StaffResetPasswordView(APIView):
 
         target.set_password(password)
         target.save(update_fields=["password"])
-
 
         log(
             request.user,
@@ -702,7 +749,13 @@ class SubscriptionListCreateView(APIView):
     def get(self, request):
         params = request.query_params
         rows = SubscriptionPayment.objects.select_related(
-            "tenant", "recorded_by", "submitted_by", "decided_by"
+            "tenant",
+            "tenant__sales_agent",
+            "tenant__parent",
+            "tenant__parent__sales_agent",
+            "recorded_by",
+            "submitted_by",
+            "decided_by",
         )
         status_filter = (params.get("status") or "").upper()
         if status_filter in {"PENDING", "APPROVED", "REJECTED"}:
@@ -711,8 +764,8 @@ class SubscriptionListCreateView(APIView):
         if channel in {"TELEBIRR", "BANK", "CASH", "OTHER"}:
             rows = rows.filter(channel=channel)
         tenant_id = (params.get("tenant") or "").strip()
-        if tenant_id:
-            rows = rows.filter(tenant_id=tenant_id)
+        if tenant_id.isdigit():
+            rows = rows.filter(tenant_id=int(tenant_id))
         term = (params.get("search") or "").strip()
         if term:
             rows = rows.filter(

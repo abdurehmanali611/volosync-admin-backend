@@ -73,6 +73,7 @@ class PricingPlanSerializer(serializers.ModelSerializer):
             "inventory_yearly_fee",
             "hr_yearly_fee",
             "sales_role_yearly_fee",
+            "description",
             "is_default",
             "active",
             "created_at",

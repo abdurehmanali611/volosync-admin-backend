@@ -87,6 +87,14 @@ def reject_subscription(payment, actor, note=""):
     payment.save(update_fields=["status", "decided_by", "decided_at", "decision_note"])
 
 
+def tenant_sales_agent_name(tenant):
+    """A branch is sold with its company, so fall back to the parent's agent."""
+    agent = tenant.sales_agent
+    if agent is None and tenant.parent_id:
+        agent = tenant.parent.sales_agent
+    return agent.name if agent else ""
+
+
 def payment_row(row):
     """Row shape shared by every subscription-payment listing.
 
@@ -98,6 +106,8 @@ def payment_row(row):
         "id": row.id,
         "tenant": row.tenant_id,
         "tenant_name": row.tenant.name,
+        "tin": row.tenant.tin,
+        "sales_agent_name": tenant_sales_agent_name(row.tenant),
         "transaction_id": row.transaction_id,
         "transaction_ref": row.transaction_id,
         "channel": row.channel,
