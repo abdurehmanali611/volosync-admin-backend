@@ -551,6 +551,7 @@ class TenantOwnerView(APIView):
     GET   → {id, username, email, name, last_login, must_change_password}.
     POST  {"username", "password", "email"?} → creates the owner login.
     PATCH {"username"?, "email"?} → updates the owner's login/contact email.
+    DELETE → removes this tenant's owner login.
     Password resets go through POST /api/tenants/staff/<id>/reset-password/.
     """
 
@@ -655,6 +656,25 @@ class TenantOwnerView(APIView):
             f"@{owner.username} email={owner.email}",
         )
         return Response({"data": _owner_payload(owner)})
+
+    @require_platform_admin
+    def delete(self, request, pk):
+        from user.models import Profile
+
+        tenant, owner = self._owner(pk)
+        if not tenant:
+            return Response({"errors": {"message": "Not found."}}, status=404)
+        if not owner:
+            return Response(
+                {"errors": {"message": "This tenant has no owner account."}}, status=404
+            )
+        owner_id, owner_name = owner.pk, owner.username
+        Profile.objects.filter(user=owner, tenant=tenant).delete()
+        if not Profile.objects.filter(user=owner).exists():
+            owner.delete()
+
+        log(request.user, "OWNER_DELETED", "user", owner_id, owner_name)
+        return Response({"data": None})
 
 
 def _owner_payload(owner):
