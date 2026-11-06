@@ -88,6 +88,7 @@ class PlatformSalesAgentSerializer(serializers.ModelSerializer):
             "name",
             "phone",
             "email",
+            "city",
             "sex",
             "active",
             "notes",

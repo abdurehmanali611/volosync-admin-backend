@@ -27,6 +27,7 @@ class PlatformSalesAgentListCreateView(APIView):
                 Q(name__icontains=term)
                 | Q(phone__icontains=term)
                 | Q(email__icontains=term)
+                | Q(city__icontains=term)
                 | Q(notes__icontains=term)
             )
         active = (request.query_params.get("active") or "").strip().lower()
@@ -53,6 +54,7 @@ class PlatformSalesAgentListCreateView(APIView):
             name=name,
             phone=request.data.get("phone", ""),
             email=request.data.get("email", ""),
+            city=request.data.get("city", ""),
             sex=request.data.get("sex", ""),
             active=bool(request.data.get("active", True)),
             notes=request.data.get("notes", ""),
@@ -92,7 +94,7 @@ class PlatformSalesAgentDetailView(APIView):
         agent = PlatformSalesAgent.objects.filter(pk=pk).first()
         if agent is None:
             return Response({"errors": {"message": "Not found."}}, status=404)
-        allowed = ["name", "phone", "email", "sex", "active", "notes"]
+        allowed = ["name", "phone", "email", "city", "sex", "active", "notes"]
         for field in allowed:
             if field in request.data:
                 value = request.data[field]

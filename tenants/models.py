@@ -379,6 +379,7 @@ class PlatformSalesAgent(models.Model):
     name = models.CharField(max_length=120)
     phone = models.CharField(max_length=40, blank=True)
     email = models.EmailField(blank=True)
+    city = models.CharField(max_length=120, blank=True)
     sex = models.CharField(max_length=10, blank=True)
     active = models.BooleanField(default=True)
     notes = models.TextField(blank=True)
