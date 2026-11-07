@@ -25,7 +25,7 @@ from .models import (
     Tenant,
 )
 from .platform_views import log, truthy
-from .pricing import suggest_annual_fee
+from .pricing import default_plan, suggest_annual_fee
 from .serializers import TenantSerializer
 from .services import (
     approve_subscription,
@@ -92,6 +92,7 @@ class TenantListView(APIView):
 
         from user.models import Profile
 
+        plan = default_plan()
         tenant = Tenant.objects.create(
             name=name,
             tin=tin,
@@ -105,6 +106,9 @@ class TenantListView(APIView):
             sales_agent=sales_agent,
             is_main=True,
             subscription_expires_on=timezone.localdate() + timedelta(days=365),
+            # New wholesalers start with the catalog's one-time setup fee; the
+            # console can override it per tenant on the billing tab.
+            setup_fee=plan.setup_fee if plan else None,
         )
         manager = User.objects.create_user(
             username=username,
@@ -995,6 +999,9 @@ class BranchCreateView(APIView):
             module_inventory=parent.module_inventory,
             module_hr=parent.module_hr,
             sales_role_enabled=parent.sales_role_enabled,
+            # A branch bills under its company, so it inherits the company's
+            # setup fee too (the console can still override it per branch).
+            setup_fee=parent.setup_fee,
             parent=parent,
         )
 

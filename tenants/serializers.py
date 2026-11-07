@@ -31,6 +31,7 @@ class TenantSerializer(serializers.ModelSerializer):
             "subscription_note",
             "subscription_state",
             "annual_fee",
+            "setup_fee",
             "created_at",
         ]
 

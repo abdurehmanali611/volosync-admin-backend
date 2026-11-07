@@ -43,6 +43,12 @@ class Tenant(models.Model):
     annual_fee = models.DecimalField(
         max_digits=14, decimal_places=2, default=Decimal("0.00")
     )
+    # One-time onboarding fee the free-trial payment asks for. NULL/zero means
+    # the console has not set one; the tenant portal then falls back to the
+    # yearly fee the trial payment actually activates.
+    setup_fee = models.DecimalField(
+        max_digits=14, decimal_places=2, null=True, blank=True
+    )
     # --- Access control (Apex console) -------------------------------------
     # Each state keeps its own reason/actor/timestamp trail so the Access tab
     # can show why a wholesaler was restricted, not just that it was.

@@ -397,8 +397,9 @@ class TenantBillingView(APIView):
                     status=400,
                 )
             tenant.annual_fee = suggested
+            tenant.setup_fee = default_plan().setup_fee
             tenant.fees_manually_set = False
-            fields += ["annual_fee", "fees_manually_set"]
+            fields += ["annual_fee", "setup_fee", "fees_manually_set"]
             applied = True
 
         if not fields:
@@ -494,8 +495,9 @@ class TenantModulesView(APIView):
                     status=400,
                 )
             tenant.annual_fee = suggested
+            tenant.setup_fee = default_plan().setup_fee
             tenant.fees_manually_set = False
-            fields += ["annual_fee", "fees_manually_set"]
+            fields += ["annual_fee", "setup_fee", "fees_manually_set"]
             applied = True
         if not fields:
             return Response({"errors": {"message": "Nothing to update."}}, status=400)
