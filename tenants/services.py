@@ -68,11 +68,15 @@ def approve_subscription(payment, actor, note=""):
     tenant.subscription_transaction_id = payment.transaction_id
     tenant.subscription_paid_on = payment.paid_on
     tenant.subscription_expires_on = covers_until
+    # The approval starts the paid year: retire the free trial so its 10-day
+    # warning and any trial-based login block do not outlive the payment.
+    tenant.free_trial_ends_on = None
     tenant.save(
         update_fields=[
             "subscription_transaction_id",
             "subscription_paid_on",
             "subscription_expires_on",
+            "free_trial_ends_on",
         ]
     )
     return covers_until
