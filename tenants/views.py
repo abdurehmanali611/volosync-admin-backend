@@ -25,7 +25,7 @@ from .models import (
     Tenant,
 )
 from .platform_views import log, truthy
-from .pricing import default_plan, suggest_annual_fee
+from .pricing import default_plan, suggest_fees
 from .serializers import TenantSerializer
 from .services import (
     approve_subscription,
@@ -422,13 +422,16 @@ class TenantDetailView(APIView):
 
         tenant.save()
 
-        suggested = suggest_annual_fee(tenant)
+        _suggested_plan, suggested, suggested_setup = suggest_fees(tenant)
         apply_fee = truthy(request.data.get("apply_fee", False))
         fee_applied = False
         if apply_fee and suggested is not None:
             tenant.annual_fee = suggested
+            tenant.setup_fee = suggested_setup
             tenant.fees_manually_set = False
-            tenant.save(update_fields=["annual_fee", "fees_manually_set"])
+            tenant.save(
+                update_fields=["annual_fee", "setup_fee", "fees_manually_set"]
+            )
             fee_applied = True
 
         detail = str(sorted(request.data))

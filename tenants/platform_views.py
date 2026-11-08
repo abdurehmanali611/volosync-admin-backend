@@ -518,7 +518,7 @@ class ModuleRequestListView(APIView):
     def patch(self, request, pk=None):
         from django.utils import timezone
 
-        from .pricing import suggest_annual_fee
+        from .pricing import suggest_fees
 
         row_id = pk or request.data.get("id")
         row = ModuleRequest.objects.select_related("tenant").filter(pk=row_id).first()
@@ -568,14 +568,15 @@ class ModuleRequestListView(APIView):
                     setattr(tenant, attr, False)
                     switched.append(attr)
 
-        projected = suggest_annual_fee(tenant)
+        _plan, projected, projected_setup = suggest_fees(tenant)
         if truthy(request.data.get("apply_fee")) and new_status == "APPROVED":
             if projected is None:
                 return Response(
-                    {"errors": {"message": "No default active pricing plan to price from."}},
+                    {"errors": {"message": "No active pricing plan to price from."}},
                     status=400,
                 )
             tenant.annual_fee = projected
+            tenant.setup_fee = projected_setup
             tenant.fees_manually_set = False
 
         with transaction.atomic():
@@ -583,7 +584,12 @@ class ModuleRequestListView(APIView):
                 truthy(request.data.get("apply_fee")) and new_status == "APPROVED"
             ):
                 tenant.save(
-                    update_fields=list(dict.fromkeys(switched + ["annual_fee", "fees_manually_set"]))
+                    update_fields=list(
+                        dict.fromkeys(
+                            switched
+                            + ["annual_fee", "setup_fee", "fees_manually_set"]
+                        )
+                    )
                 )
             row.status = new_status
             row.review_note = review_note

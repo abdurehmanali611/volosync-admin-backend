@@ -35,7 +35,7 @@ from .models import (
     Tenant,
 )
 from .platform_views import log, truthy
-from .pricing import default_plan, suggest_annual_fee
+from .pricing import suggest_annual_fee, suggest_fees
 from .serializers import TenantSerializer
 
 ZERO = Decimal("0.00")
@@ -80,13 +80,19 @@ def access_payload(tenant):
 
 def billing_payload(tenant, plan=None):
     """The billing tile set: state, countdown, fee and how the fee was set."""
-    plan = plan if plan is not None else default_plan()
-    suggested = suggest_annual_fee(tenant, plan)
+    if plan is None:
+        plan, suggested, suggested_setup = suggest_fees(tenant)
+    else:
+        suggested = suggest_annual_fee(tenant, plan)
+        suggested_setup = plan.setup_fee if plan else None
     return {
         "billing_state": tenant.billing_state,
         "subscription_state": tenant.subscription_state,
         "annual_fee": money(tenant.annual_fee),
         "suggested_annual_fee": money(suggested) if suggested is not None else None,
+        "suggested_setup_fee": money(suggested_setup)
+        if suggested_setup is not None
+        else None,
         "fees_manually_set": tenant.fees_manually_set,
         "is_illustration": tenant.is_illustration,
         "billing_hold": tenant.billing_hold,
@@ -104,7 +110,10 @@ def billing_payload(tenant, plan=None):
 
 def module_flags(tenant, plan=None):
     """Per-module state + the yearly-fee breakdown for this tenant."""
-    plan = plan if plan is not None else default_plan()
+    if plan is None:
+        plan, projected, _setup = suggest_fees(tenant)
+    else:
+        projected = suggest_annual_fee(tenant, plan)
 
     def fee(value):
         return money(value) if value is not None else None
@@ -143,9 +152,7 @@ def module_flags(tenant, plan=None):
         "modules": lines,
         "enabled": [line["code"] for line in lines if line["enabled"]],
         "plan": plan.name if plan else None,
-        "projected_annual_fee": money(suggest_annual_fee(tenant, plan))
-        if plan
-        else None,
+        "projected_annual_fee": money(projected) if projected is not None else None,
     }
 
 
@@ -388,16 +395,25 @@ class TenantBillingView(APIView):
             tenant.fees_manually_set = True
             fields += ["annual_fee", "fees_manually_set"]
 
+        if "setup_fee" in request.data:
+            try:
+                tenant.setup_fee = Decimal(str(request.data["setup_fee"] or "0"))
+            except InvalidOperation:
+                return Response(
+                    {"errors": {"message": "setup_fee must be a number."}}, status=400
+                )
+            fields.append("setup_fee")
+
         applied = False
         if truthy(request.data.get("apply_fee")):
-            suggested = suggest_annual_fee(tenant)
-            if suggested is None:
+            plan, suggested, suggested_setup = suggest_fees(tenant)
+            if suggested is None or plan is None:
                 return Response(
-                    {"errors": {"message": "No default active pricing plan to price from."}},
+                    {"errors": {"message": "No active pricing plan to price from."}},
                     status=400,
                 )
             tenant.annual_fee = suggested
-            tenant.setup_fee = default_plan().setup_fee
+            tenant.setup_fee = suggested_setup
             tenant.fees_manually_set = False
             fields += ["annual_fee", "setup_fee", "fees_manually_set"]
             applied = True
@@ -488,14 +504,14 @@ class TenantModulesView(APIView):
                 fields.append(attr)
         applied = False
         if truthy(request.data.get("apply_fee")) and fields:
-            suggested = suggest_annual_fee(tenant)
-            if suggested is None:
+            plan, suggested, suggested_setup = suggest_fees(tenant)
+            if suggested is None or plan is None:
                 return Response(
-                    {"errors": {"message": "No default active pricing plan to price from."}},
+                    {"errors": {"message": "No active pricing plan to price from."}},
                     status=400,
                 )
             tenant.annual_fee = suggested
-            tenant.setup_fee = default_plan().setup_fee
+            tenant.setup_fee = suggested_setup
             tenant.fees_manually_set = False
             fields += ["annual_fee", "setup_fee", "fees_manually_set"]
             applied = True
