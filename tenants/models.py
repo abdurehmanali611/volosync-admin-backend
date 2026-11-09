@@ -1,3 +1,4 @@
+from datetime import timedelta
 from decimal import Decimal
 
 from django.conf import settings
@@ -107,12 +108,17 @@ class Tenant(models.Model):
         return self.parent_id is not None
 
     @property
+    def coverage_ends_on(self):
+        # Post-year billing: the approved setup covers the first year.
+        if self.subscription_expires_on:
+            return self.subscription_expires_on
+        return self.created_at.date() + timedelta(days=365)
+
+    @property
     def subscription_state(self):
         from django.utils import timezone
 
-        if not self.subscription_expires_on:
-            return "UNPAID"
-        days = (self.subscription_expires_on - timezone.localdate()).days
+        days = (self.coverage_ends_on - timezone.localdate()).days
         if days < 0:
             return "EXPIRED"
         if days <= 30:
@@ -128,9 +134,7 @@ class Tenant(models.Model):
     def days_to_renewal(self):
         from django.utils import timezone
 
-        if not self.subscription_expires_on:
-            return None
-        return (self.subscription_expires_on - timezone.localdate()).days
+        return (self.coverage_ends_on - timezone.localdate()).days
 
     @property
     def trial_days_left(self):
@@ -161,8 +165,6 @@ class Tenant(models.Model):
                 return "TRIAL_EXPIRED"
             return "TRIAL_ENDING" if left <= 5 else "TRIAL"
         days = self.days_to_renewal
-        if days is None:
-            return "UNPAID"
         if days < 0:
             return "EXPIRED" if days <= -10 else "GRACE"
         return "ACTIVE" if days > 30 else "DUE_SOON"

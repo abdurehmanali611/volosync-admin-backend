@@ -199,6 +199,7 @@ def approve_branch_request(row, actor, note=""):
             is_main=False,
             annual_fee=yearly if yearly is not None else Decimal("0.00"),
             setup_fee=setup if setup is not None else Decimal("0.00"),
+            subscription_expires_on=timezone.localdate() + timedelta(days=365),
         )
         if username and row.manager_password_hash:
             user = User(

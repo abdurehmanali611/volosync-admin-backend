@@ -15,7 +15,6 @@ from .excel_views import ExcelImportView, ExcelTemplateView
 from .platform_views import (
     AuditLogListView,
     FeedbackListView,
-    ModuleRequestListView,
     MonthlySignupsView,
     SetupPaymentListView,
 )
@@ -44,8 +43,6 @@ urlpatterns = [
     path("feedback/", FeedbackListView.as_view()),
     path("audit/", AuditLogListView.as_view()),
     path("setup-payments/", SetupPaymentListView.as_view()),
-    path("module-requests/", ModuleRequestListView.as_view()),
-    path("module-requests/<int:pk>/", ModuleRequestListView.as_view()),
     # Owner-filed branch approvals + multi-branch yearly payments.
     path("branch-requests/", BranchRequestListView.as_view()),
     path("branch-requests/<int:pk>/", BranchRequestListView.as_view()),

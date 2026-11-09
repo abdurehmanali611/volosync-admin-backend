@@ -18,7 +18,6 @@ from .models import (
     ChatMessage,
     ChatThread,
     Feedback,
-    ModuleRequest,
     PlatformSalesAgent,
     SetupPayment,
     SubscriptionPayment,
@@ -341,9 +340,8 @@ class TenantDetailView(APIView):
                 }
                 for member in family
             ],
-            # Yearly billing: the renewal falls due on the expiry date.
-            # null = never paid (subscription_state UNPAID).
-            "next_renewal_date": tenant.subscription_expires_on,
+            # Yearly billing: the renewal falls due at the end of the coverage.
+            "next_renewal_date": tenant.coverage_ends_on,
             "paid_years": paid_years,
             "setup_approved": setup_holder.setup_payments.filter(
                 status="APPROVED"
@@ -354,7 +352,6 @@ class TenantDetailView(APIView):
                 "lots": lots.count(),
                 "payments": tenant.subscription_payments.count(),
                 "setup_payments": tenant.setup_payments.count(),
-                "module_requests": tenant.module_requests.count(),
                 "roles": roles,
             },
             "stock_value": str(stock_value),
@@ -744,21 +741,31 @@ class AdminDashboardView(APIView):
         )
         threads = ChatThread.objects.all()
         unread_messages = ChatMessage.objects.filter(side="TENANT", read_by_apex=False)
-        due_overdue = companies.filter(subscription_expires_on__lt=today)
+        # Post-year billing: a null expiry is covered for its first year.
+        year_start = today - timedelta(days=365)
+        covered_null = Q(subscription_expires_on__isnull=True, created_at__date__gte=year_start)
+        lapsed_null = Q(subscription_expires_on__isnull=True, created_at__date__lt=year_start)
+        due_overdue = companies.filter(Q(subscription_expires_on__lt=today) | lapsed_null)
         return Response(
             {
                 "data": {
                     "companies": companies.count(),
                     "branches": tenants.filter(parent__isnull=False).count(),
                     "active": companies.filter(
-                        subscription_expires_on__gte=today
+                        Q(subscription_expires_on__gte=today) | covered_null
                     ).count(),
                     "due_soon": companies.filter(
-                        subscription_expires_on__gte=today,
-                        subscription_expires_on__lte=soon,
+                        Q(
+                            subscription_expires_on__gte=today,
+                            subscription_expires_on__lte=soon,
+                        )
+                        | Q(
+                            subscription_expires_on__isnull=True,
+                            created_at__date__gte=year_start,
+                            created_at__date__lte=soon - timedelta(days=365),
+                        )
                     ).count(),
-                    "expired": companies.filter(subscription_expires_on__lt=today).count()
-                    + companies.filter(subscription_expires_on__isnull=True).count(),
+                    "expired": due_overdue.count(),
                     "year_revenue": str(revenue),
                     "payments": payments.count(),
                     "stock_value": str(stock_value),
@@ -767,9 +774,6 @@ class AdminDashboardView(APIView):
                         status="PENDING"
                     ).count(),
                     "pending_setup_payments": SetupPayment.objects.filter(
-                        status="PENDING"
-                    ).count(),
-                    "pending_module_requests": ModuleRequest.objects.filter(
                         status="PENDING"
                     ).count(),
                     "unread_feedback": Feedback.objects.filter(unread=True).count(),
@@ -936,9 +940,11 @@ class StaffListView(APIView):
         from .console_views import staff_row
         from user.models import Profile
 
-        profiles = Profile.objects.select_related(
-            "user", "tenant", "login_disabled_by"
-        ).order_by("tenant__name", "role")
+        profiles = (
+            Profile.objects.select_related("user", "tenant", "login_disabled_by")
+            .exclude(tenant__account_status="DELETED")
+            .order_by("tenant__name", "role")
+        )
         params = request.query_params
         term = (params.get("search") or "").strip()
         if term:
@@ -1047,6 +1053,7 @@ class BranchCreateView(APIView):
             # borrowing another plan's amount.
             setup_fee=setup if setup is not None else Decimal("0.00"),
             parent=parent,
+            subscription_expires_on=timezone.localdate() + timedelta(days=365),
         )
 
         username = (request.data.get("username") or "").strip()

@@ -29,7 +29,6 @@ from user.platform import require_platform_admin
 from .models import (
     ChatMessage,
     ChatThread,
-    ModuleRequest,
     SetupPayment,
     SubscriptionPayment,
     Tenant,
@@ -101,7 +100,7 @@ def billing_payload(tenant, plan=None):
         "free_trial_ends_on": tenant.free_trial_ends_on,
         "trial_days_left": tenant.trial_days_left,
         "days_to_renewal": tenant.days_to_renewal,
-        "next_renewal_date": tenant.subscription_expires_on,
+        "next_renewal_date": tenant.coverage_ends_on,
         "subscription_paid_on": tenant.subscription_paid_on,
         "subscription_transaction_id": tenant.subscription_transaction_id,
         "plan": plan.name if plan else None,
@@ -462,26 +461,11 @@ class TenantModulesView(APIView):
                 "id", "name", "tin", "module_inventory", "module_hr", "sales_role_enabled"
             )
         ]
-        pending = ModuleRequest.objects.filter(tenant=tenant, status="PENDING")
         return Response(
             {
                 "data": {
                     **module_flags(tenant),
                     "annual_fee": money(tenant.annual_fee),
-                    "requests": [
-                        {
-                            "id": row.id,
-                            "requested_modules": row.requested_modules,
-                            "current_modules": row.current_modules,
-                            "projected_annual_fee": money(row.projected_annual_fee)
-                            if row.projected_annual_fee is not None
-                            else None,
-                            "note": row.note,
-                            "status": row.status,
-                            "created_at": row.created_at,
-                        }
-                        for row in pending
-                    ],
                     "branches": branches,
                 }
             }
@@ -662,9 +646,6 @@ class TenantReportingView(APIView):
                         ),
                         "setup": status_counts(
                             SetupPayment.objects.filter(tenant=tenant)
-                        ),
-                        "module_requests": status_counts(
-                            ModuleRequest.objects.filter(tenant=tenant)
                         ),
                     },
                     "approvals": {

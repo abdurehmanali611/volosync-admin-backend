@@ -12,7 +12,6 @@ from user.platform import require_platform_admin
 from .models import (
     AuditLog,
     Feedback,
-    ModuleRequest,
     PricingPlan,
     SetupPayment,
     SubscriptionPayment,
@@ -454,169 +453,6 @@ class SetupPaymentListView(APIView):
         return Response({"data": setup_payment_row(row)})
 
 
-class ModuleRequestListView(APIView):
-    """Switch-on/switch-off requests: the review sheet compares current state,
-    the requested state and the yearly fee the switch would produce.
-
-    GET  ?status=PENDING|APPROVED|REJECTED · ?search= tenant/TIN
-    PATCH {id, status|decision, review_note?, apply_fee?}
-          APPROVED applies the switches (and reprices when apply_fee is set);
-          REJECTED requires a review note.
-    """
-
-    MODULE_ATTRS = {
-        "INVENTORY": "module_inventory",
-        "HR": "module_hr",
-        "SALES_ROLE": "sales_role_enabled",
-    }
-
-    def _row(self, row):
-        return {
-            "id": row.id,
-            "tenant": row.tenant.name,
-            "tenant_id": row.tenant_id,
-            "tin": row.tenant.tin,
-            "requested_modules": row.requested_modules,
-            "current_modules": row.current_modules,
-            "note": row.note,
-            "status": row.status,
-            "projected_annual_fee": str(row.projected_annual_fee)
-            if row.projected_annual_fee is not None
-            else None,
-            "annual_fee": str(row.tenant.annual_fee),
-            "review_note": row.review_note,
-            "decided_by": row.decided_by.username if row.decided_by else "",
-            "created_at": row.created_at,
-            "decided_at": row.decided_at,
-        }
-
-    @require_platform_admin
-    def get(self, request):
-        rows = ModuleRequest.objects.select_related(
-            "tenant", "decided_by"
-        ).order_by("-created_at", "-id")
-        status_filter = (request.query_params.get("status") or "").upper()
-        if status_filter in {"PENDING", "APPROVED", "REJECTED"}:
-            rows = rows.filter(status=status_filter)
-        tenant_id = (request.query_params.get("tenant") or "").strip()
-        if tenant_id.isdigit():
-            rows = rows.filter(tenant_id=int(tenant_id))
-        term = (request.query_params.get("search") or "").strip()
-        if term:
-            rows = rows.filter(
-                Q(tenant__name__icontains=term) | Q(tenant__tin__icontains=term)
-            )
-        limit = _limit(request)
-        return Response(
-            {
-                "data": [self._row(row) for row in rows[:limit]],
-                "meta": {"total": rows.count()},
-            }
-        )
-
-    @require_platform_admin
-    def patch(self, request, pk=None):
-        from django.utils import timezone
-
-        from .pricing import suggest_fees
-
-        row_id = pk or request.data.get("id")
-        row = ModuleRequest.objects.select_related("tenant").filter(pk=row_id).first()
-        if row is None:
-            return Response({"errors": {"message": "Not found."}}, status=404)
-        if row.status != "PENDING":
-            return Response({"errors": {"message": "Request already decided."}}, status=400)
-        new_status = (request.data.get("status") or request.data.get("decision") or "").upper()
-        if new_status not in {"APPROVED", "REJECTED"}:
-            return Response(
-                {"errors": {"message": "decision must be APPROVED or REJECTED."}},
-                status=400,
-            )
-        review_note = (
-            request.data.get("review_note")
-            or request.data.get("note")
-            or request.data.get("reason")
-            or ""
-        ).strip()
-        if new_status == "REJECTED" and len(review_note) < 4:
-            return Response(
-                {"errors": {"message": "Explain the decision — the wholesaler sees it."}},
-                status=400,
-            )
-
-        tenant = row.tenant
-        projected = None
-        switched = []
-        if new_status == "APPROVED":
-            wanted = {
-                part.strip().upper()
-                for part in (row.requested_modules or "").split(",")
-                if part.strip()
-            }
-            wanted -= set(Tenant.REQUIRED_MODULES)
-            for code, attr in self.MODULE_ATTRS.items():
-                if code in wanted and not getattr(tenant, attr):
-                    setattr(tenant, attr, True)
-                    switched.append(attr)
-            disabled = {
-                part.strip().upper()
-                for part in (request.data.get("disable_modules") or "").split(",")
-                if part.strip()
-            }
-            for code, attr in self.MODULE_ATTRS.items():
-                if code in disabled and getattr(tenant, attr):
-                    setattr(tenant, attr, False)
-                    switched.append(attr)
-
-        _plan, projected, projected_setup = suggest_fees(tenant)
-        if truthy(request.data.get("apply_fee")) and new_status == "APPROVED":
-            if projected is None:
-                return Response(
-                    {"errors": {"message": "No active pricing plan to price from."}},
-                    status=400,
-                )
-            tenant.annual_fee = projected
-            tenant.setup_fee = projected_setup
-            tenant.fees_manually_set = False
-
-        with transaction.atomic():
-            if switched or (
-                truthy(request.data.get("apply_fee")) and new_status == "APPROVED"
-            ):
-                tenant.save(
-                    update_fields=list(
-                        dict.fromkeys(
-                            switched
-                            + ["annual_fee", "setup_fee", "fees_manually_set"]
-                        )
-                    )
-                )
-            row.status = new_status
-            row.review_note = review_note
-            row.decided_by = request.user
-            row.decided_at = timezone.now()
-            row.projected_annual_fee = projected
-            row.save(
-                update_fields=[
-                    "status",
-                    "review_note",
-                    "decided_by",
-                    "decided_at",
-                    "projected_annual_fee",
-                ]
-            )
-        log(
-            request.user,
-            "MODULE_" + row.status,
-            "module_request",
-            row.id,
-            f"{tenant.name} · {row.requested_modules}"
-            + (f" · {sorted(set(switched))}" if switched else ""),
-            reason=review_note,
-        )
-        return Response({"data": self._row(row)})
-
-
 FEE_FIELDS = (
     "setup_fee",
     "yearly_base_fee",
@@ -841,8 +677,7 @@ class ModulesCatalogView(APIView):
         available = [
             {
                 # Credentials is the basic layer: always on for every tenant.
-                # It is never requestable (ModuleRequest DECISIONS) and never
-                # billable, so it carries no fee.
+                # It is never billable, so it carries no fee.
                 "code": "CREDENTIALS",
                 "name": "Credentials",
                 "description": "Login accounts, roles and permissions — included with every plan.",
@@ -872,7 +707,6 @@ class ModulesCatalogView(APIView):
                 # pricing plan exists (fees cannot be quoted without it).
                 "active_for_platform": plan is not None and plan.active,
                 "always_on": module.get("always_on", False),
-                "requestable": not module.get("always_on", False),
             }
             for module in available
         ]
