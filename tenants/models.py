@@ -180,6 +180,7 @@ class SubscriptionPayment(models.Model):
 
     CHANNEL_CHOICES = (
         ("TELEBIRR", "Telebirr"),
+        ("CBE", "CBE"),
         ("BANK", "Bank"),
         ("CASH", "Cash"),
         ("OTHER", "Other"),

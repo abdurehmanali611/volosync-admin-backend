@@ -839,7 +839,7 @@ class SubscriptionListCreateView(APIView):
         if status_filter in {"PENDING", "APPROVED", "REJECTED"}:
             rows = rows.filter(status=status_filter)
         channel = (params.get("channel") or "").upper()
-        if channel in {"TELEBIRR", "BANK", "CASH", "OTHER"}:
+        if channel in {"TELEBIRR", "CBE", "BANK", "CASH", "OTHER"}:
             rows = rows.filter(channel=channel)
         tenant_id = (params.get("tenant") or "").strip()
         if tenant_id.isdigit():
@@ -878,7 +878,7 @@ class SubscriptionListCreateView(APIView):
         amount = Decimal(str(request.data.get("amount") or "0"))
         note = request.data.get("note", "")
         channel = (request.data.get("channel") or "OTHER").upper()
-        if channel not in {"TELEBIRR", "BANK", "CASH", "OTHER"}:
+        if channel not in {"TELEBIRR", "CBE", "BANK", "CASH", "OTHER"}:
             channel = "OTHER"
 
         approved_now = str(

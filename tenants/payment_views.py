@@ -57,7 +57,7 @@ def read_submission(request):
     channel = (request.data.get("channel") or "OTHER").upper()
     if channel not in CHANNELS:
         return None, None, None, None, None, Response(
-            {"errors": {"message": "channel must be TELEBIRR, BANK, CASH or OTHER."}},
+            {"errors": {"message": "channel must be TELEBIRR, CBE, BANK, CASH or OTHER."}},
             status=400,
         )
     try:
@@ -209,7 +209,7 @@ class SetupPaymentSubmitView(APIView):
         channel = (request.data.get("channel") or "OTHER").upper()
         if channel not in CHANNELS:
             return Response(
-                {"errors": {"message": "channel must be TELEBIRR, BANK, CASH or OTHER."}},
+                {"errors": {"message": "channel must be TELEBIRR, CBE, BANK, CASH or OTHER."}},
                 status=400,
             )
         try:

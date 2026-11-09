@@ -22,7 +22,7 @@ from .pricing import default_plan
 from .serializers import PricingPlanSerializer
 from .services import tenant_sales_agent_name
 
-CHANNELS = {"TELEBIRR", "BANK", "CASH", "OTHER"}
+CHANNELS = {"TELEBIRR", "CBE", "BANK", "CASH", "OTHER"}
 
 
 def log(actor, action, target_type="", target_id="", detail="", reason=""):

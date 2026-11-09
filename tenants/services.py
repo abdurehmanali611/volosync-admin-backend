@@ -16,7 +16,7 @@ from django.utils import timezone
 from .models import SetupPayment, SubscriptionPayment, Tenant
 from .pricing import suggest_fees
 
-CHANNELS = {"TELEBIRR", "BANK", "CASH", "OTHER"}
+CHANNELS = {"TELEBIRR", "CBE", "BANK", "CASH", "OTHER"}
 STATUSES = {"PENDING", "APPROVED", "REJECTED"}
 
 User = get_user_model()
