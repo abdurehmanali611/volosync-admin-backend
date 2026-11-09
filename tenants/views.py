@@ -337,6 +337,8 @@ class TenantDetailView(APIView):
                     "name": member.name,
                     "is_main": member.is_main,
                     "is_root": member.parent_id is None,
+                    # Satellite branches display the main branch's logo.
+                    "logo_url": member.logo_url,
                 }
                 for member in family
             ],

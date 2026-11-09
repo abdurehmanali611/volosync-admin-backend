@@ -25,6 +25,7 @@ class TenantSerializer(serializers.ModelSerializer):
             "sales_agent_name",
             "parent",
             "is_main",
+            "account_status",
             "subscription_expires_on",
             "subscription_transaction_id",
             "subscription_paid_on",
