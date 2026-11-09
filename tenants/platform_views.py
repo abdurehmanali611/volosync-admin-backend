@@ -1,7 +1,9 @@
+from datetime import timedelta
 from decimal import Decimal, InvalidOperation
 
 from django.db import transaction
 from django.db.models import Count, F, Q, Sum
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -442,6 +444,27 @@ class SetupPaymentListView(APIView):
         row.decided_at = timezone.now()
         row.decision_note = note
         row.save(update_fields=["status", "decided_by", "decided_at", "decision_note"])
+
+        # A self-signup waits on this decision: approving it activates the
+        # wholesaler with a one-year paid subscription. Manually created
+        # tenants already carry their coverage, so the stamp only fills a gap.
+        activated = False
+        if new_status == "APPROVED" and row.tenant_id:
+            tenant = row.tenant
+            today = timezone.localdate()
+            if not tenant.subscription_expires_on or tenant.subscription_expires_on < today:
+                tenant.subscription_expires_on = today + timedelta(days=365)
+                tenant.subscription_paid_on = today
+                tenant.subscription_transaction_id = row.transaction_ref
+                tenant.save(
+                    update_fields=[
+                        "subscription_expires_on",
+                        "subscription_paid_on",
+                        "subscription_transaction_id",
+                    ]
+                )
+                activated = True
+
         log(
             request.user,
             "SETUP_" + row.status,
@@ -450,7 +473,7 @@ class SetupPaymentListView(APIView):
             row.tenant.name,
             reason=note,
         )
-        return Response({"data": setup_payment_row(row)})
+        return Response({"data": {**setup_payment_row(row), "tenant_activated": activated}})
 
 
 FEE_FIELDS = (
