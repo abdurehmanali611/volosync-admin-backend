@@ -30,6 +30,7 @@ from .serializers import TenantSerializer
 from .services import (
     approve_subscription,
     create_subscription_submission,
+    fees_for_modules,
     payment_row,
 )
 
@@ -269,6 +270,8 @@ class TenantListView(APIView):
                 "branch_count": tenant.branch_count,
                 "lot_count": tenant.lot_count,
                 "is_branch": tenant.parent_id is not None,
+                "is_main": tenant.is_main,
+                "parent_tin": tenant.parent.tin if tenant.parent else None,
                 "parent_name": tenant.parent.name if tenant.parent else None,
                 "stock_value": str(stock_values.get(tenant.pk) or Decimal("0.00")),
                 "account_status": tenant.account_status,
@@ -319,10 +322,25 @@ class TenantDetailView(APIView):
             or 0
         )
         setup_holder = tenant.parent or tenant
+        root = tenant.parent or tenant
+        family = [root, *root.branches.all()]
+        family.sort(key=lambda member: (not member.is_main, member.name.lower()))
         payload = {
             **TenantSerializer(tenant).data,
             "is_branch": tenant.parent_id is not None,
+            "is_main": tenant.is_main,
+            "is_root": tenant.parent_id is None,
             "parent_name": tenant.parent.name if tenant.parent else None,
+            "family": [
+                {
+                    "id": member.id,
+                    "tin": member.tin,
+                    "name": member.name,
+                    "is_main": member.is_main,
+                    "is_root": member.parent_id is None,
+                }
+                for member in family
+            ],
             # Yearly billing: the renewal falls due on the expiry date.
             # null = never paid (subscription_state UNPAID).
             "next_renewal_date": tenant.subscription_expires_on,
@@ -993,18 +1011,41 @@ class BranchCreateView(APIView):
                 {"errors": {"message": "That TIN already exists."}}, status=400
             )
 
+        # A branch can price a different module mix than its company, so the
+        # console may send its own switches. Anything omitted inherits.
+        module_inventory = (
+            truthy(request.data["module_inventory"])
+            if "module_inventory" in request.data
+            else parent.module_inventory
+        )
+        module_hr = (
+            truthy(request.data["module_hr"])
+            if "module_hr" in request.data
+            else parent.module_hr
+        )
+        sales_role_enabled = (
+            truthy(request.data["sales_role_enabled"])
+            if "sales_role_enabled" in request.data
+            else parent.sales_role_enabled
+        )
+        _plan, yearly, setup = fees_for_modules(
+            module_inventory, module_hr, sales_role_enabled
+        )
+
         branch = Tenant.objects.create(
             name=name,
             tin=tin,
             phone=request.data.get("phone", ""),
             address=request.data.get("address", ""),
             vat_rate=parent.vat_rate,
-            module_inventory=parent.module_inventory,
-            module_hr=parent.module_hr,
-            sales_role_enabled=parent.sales_role_enabled,
-            # A branch bills under its company, so it inherits the company's
-            # setup fee too (the console can still override it per branch).
-            setup_fee=parent.setup_fee,
+            module_inventory=module_inventory,
+            module_hr=module_hr,
+            sales_role_enabled=sales_role_enabled,
+            annual_fee=yearly if yearly is not None else Decimal("0.00"),
+            # Modules drive the catalog fee; a missing catalog price stays at
+            # zero so the console shows its missing-fee warning instead of
+            # borrowing another plan's amount.
+            setup_fee=setup if setup is not None else Decimal("0.00"),
             parent=parent,
         )
 

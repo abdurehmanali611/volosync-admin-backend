@@ -1,5 +1,6 @@
 from django.urls import path
 
+from .branch_views import BranchPaymentRequestListView, BranchRequestListView
 from .console_views import (
     OwnerCandidateView,
     StaffLoginToggleView,
@@ -45,6 +46,11 @@ urlpatterns = [
     path("setup-payments/", SetupPaymentListView.as_view()),
     path("module-requests/", ModuleRequestListView.as_view()),
     path("module-requests/<int:pk>/", ModuleRequestListView.as_view()),
+    # Owner-filed branch approvals + multi-branch yearly payments.
+    path("branch-requests/", BranchRequestListView.as_view()),
+    path("branch-requests/<int:pk>/", BranchRequestListView.as_view()),
+    path("branch-payments/", BranchPaymentRequestListView.as_view()),
+    path("branch-payments/<int:pk>/", BranchPaymentRequestListView.as_view()),
     # Onboarding gaps: companies that still have no OWNER login.
     path("without-owner/", TenantWithoutOwnerView.as_view()),
     path("<int:pk>/", TenantDetailView.as_view()),

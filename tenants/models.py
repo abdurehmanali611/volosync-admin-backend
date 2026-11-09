@@ -226,8 +226,166 @@ class SubscriptionPayment(models.Model):
 
     def __str__(self):
         return f"{self.tenant.name} · {self.transaction_id}"
-from django.conf import settings
-from django.db import models
+
+
+class BranchRequest(models.Model):
+    """An owner's request to open a new branch, held until Apex approves it.
+
+    No `Tenant` row (and no manager `User`) is created when the request is
+    filed — approval is what materialises the branch. The setup receipt the
+    owner attached travels with this one request: approving the branch records
+    the setup payment and activates the manager credentials in one step.
+    """
+
+    STATUS = (
+        ("PENDING", "Pending"),
+        ("APPROVED", "Approved"),
+        ("REJECTED", "Rejected"),
+    )
+
+    parent = models.ForeignKey(
+        Tenant, on_delete=models.CASCADE, related_name="branch_requests"
+    )
+    name = models.CharField(max_length=255)
+    tin = models.CharField(max_length=50)
+    phone = models.CharField(max_length=40, blank=True)
+    address = models.CharField(max_length=255, blank=True)
+    vat_rate = models.DecimalField(
+        max_digits=5, decimal_places=2, default=Decimal("15.00")
+    )
+    module_inventory = models.BooleanField(default=True)
+    module_hr = models.BooleanField(default=True)
+    sales_role_enabled = models.BooleanField(default=False)
+    make_main = models.BooleanField(default=False)
+    # Manager credentials are stored hashed; the User row is created on
+    # approval and receives this hash directly.
+    manager_name = models.CharField(max_length=120, blank=True)
+    manager_username = models.CharField(max_length=150, blank=True)
+    manager_password_hash = models.CharField(max_length=128, blank=True)
+    # The one-time onboarding receipt attached to this branch request.
+    setup_channel = models.CharField(max_length=20, blank=True, default="OTHER")
+    setup_transaction_ref = models.CharField(max_length=60, blank=True)
+    setup_amount = models.DecimalField(
+        max_digits=14, decimal_places=2, default=Decimal("0.00")
+    )
+    status = models.CharField(max_length=20, choices=STATUS, default="PENDING")
+    note = models.CharField(max_length=255, blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="branch_requests_created",
+    )
+    decided_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="branch_request_decisions",
+    )
+    decided_at = models.DateTimeField(null=True, blank=True)
+    decision_note = models.CharField(max_length=255, blank=True)
+    created_branch = models.ForeignKey(
+        Tenant,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="source_branch_request",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+
+    def __str__(self):
+        return f"{self.parent.name} · {self.name} · {self.status}"
+
+
+class BranchPaymentRequest(models.Model):
+    """One owner payment covering several branches of the same company.
+
+    Each selected branch is a `BranchPaymentLine`. Approval extends every
+    included line from that branch's own expiry; an "approve with excluding"
+    decision approves only the remaining lines and leaves the excluded ones
+    unpaid so the owner can resubmit them.
+    """
+
+    STATUS = (
+        ("PENDING", "Pending"),
+        ("APPROVED", "Approved"),
+        ("PARTIALLY_APPROVED", "Partially approved"),
+        ("REJECTED", "Rejected"),
+    )
+
+    parent = models.ForeignKey(
+        Tenant, on_delete=models.CASCADE, related_name="branch_payment_requests"
+    )
+    transaction_ref = models.CharField(max_length=60)
+    channel = models.CharField(max_length=20, blank=True, default="OTHER")
+    years = models.PositiveSmallIntegerField(default=1)
+    amount = models.DecimalField(
+        max_digits=14, decimal_places=2, default=Decimal("0.00")
+    )
+    status = models.CharField(max_length=20, choices=STATUS, default="PENDING")
+    note = models.CharField(max_length=255, blank=True)
+    submitted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="branch_payment_submissions",
+    )
+    submitted_at = models.DateTimeField(null=True, blank=True)
+    decided_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="branch_payment_decisions",
+    )
+    decided_at = models.DateTimeField(null=True, blank=True)
+    decision_note = models.CharField(max_length=255, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+
+    def __str__(self):
+        return f"{self.parent.name} · {self.transaction_ref} · {self.status}"
+
+
+class BranchPaymentLine(models.Model):
+    """One branch inside a multi-branch yearly payment."""
+
+    STATUS = (
+        ("PENDING", "Pending"),
+        ("APPROVED", "Approved"),
+        ("EXCLUDED", "Excluded"),
+        ("REJECTED", "Rejected"),
+    )
+
+    request = models.ForeignKey(
+        BranchPaymentRequest, on_delete=models.CASCADE, related_name="lines"
+    )
+    tenant = models.ForeignKey(
+        Tenant, on_delete=models.CASCADE, related_name="branch_payment_lines"
+    )
+    amount = models.DecimalField(
+        max_digits=14, decimal_places=2, default=Decimal("0.00")
+    )
+    years = models.PositiveSmallIntegerField(default=1)
+    status = models.CharField(max_length=20, choices=STATUS, default="PENDING")
+    covers_until = models.DateField()
+    approved_until = models.DateField(null=True, blank=True)
+    decision_note = models.CharField(max_length=255, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["tenant__name", "id"]
+
+    def __str__(self):
+        return f"{self.tenant.name} · {self.status}"
 
 
 class Feedback(models.Model):
