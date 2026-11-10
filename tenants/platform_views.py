@@ -614,10 +614,10 @@ class PricingPreviewView(APIView):
                 return None, None, Response(
                     {"errors": {"message": "That pricing plan does not exist."}}, status=404
                 )
-        plan = plan or default_plan()
+        plan = plan or default_plan() or PricingPlan.objects.filter(active=True).order_by("id").first()
         if plan is None:
             return None, None, Response(
-                {"errors": {"message": "No default active pricing plan exists."}}, status=400
+                {"errors": {"message": "No active pricing plan exists."}}, status=400
             )
 
         tenant = None
