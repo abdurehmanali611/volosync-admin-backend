@@ -197,6 +197,8 @@ def approve_branch_request(row, actor, note=""):
             sales_role_enabled=row.sales_role_enabled,
             parent=row.parent,
             is_main=False,
+            is_illustration=row.parent.family_is_illustration,
+            logo_url=row.parent.family_logo_url,
             annual_fee=yearly if yearly is not None else Decimal("0.00"),
             setup_fee=setup if setup is not None else Decimal("0.00"),
             subscription_expires_on=timezone.localdate() + timedelta(days=365),

@@ -108,6 +108,54 @@ class Tenant(models.Model):
         return self.parent_id is not None
 
     @property
+    def family_root(self):
+        """Topmost ancestor — the anchor of this tenant's company family."""
+        root = self
+        seen = {self.pk}
+        while root.parent_id and root.parent_id not in seen:
+            parent = Tenant.objects.filter(pk=root.parent_id).first()
+            if parent is None:
+                break
+            seen.add(parent.pk)
+            root = parent
+        return root
+
+    @property
+    def family_is_illustration(self):
+        """Illustration is a company-wide identity: any member exempts the family.
+
+        Branches of an illustration wholesaler are never asked for a payment,
+        even when the flag was recorded on the main/root rather than on them.
+        """
+        if self.is_illustration:
+            return True
+        root = self.family_root
+        if root.is_illustration:
+            return True
+        frontier = [root.pk]
+        visited = {root.pk}
+        while frontier:
+            children = Tenant.objects.filter(parent_id__in=frontier)
+            if children.filter(is_illustration=True).exists():
+                return True
+            ids = list(children.values_list("pk", flat=True))
+            frontier = [pk for pk in ids if pk not in visited]
+            visited.update(frontier)
+        return False
+
+    @property
+    def family_logo_url(self):
+        """One shared logo per family: the main branch's, else any member's."""
+        root = self.family_root
+        members = [root, *root.branches.all()]
+        main = next((member for member in members if member.is_main), None)
+        if main and main.logo_url:
+            return main.logo_url
+        if self.logo_url:
+            return self.logo_url
+        return next((member.logo_url for member in members if member.logo_url), "")
+
+    @property
     def coverage_ends_on(self):
         # Post-year billing: the approved setup covers the first year.
         if self.subscription_expires_on:
@@ -119,7 +167,7 @@ class Tenant(models.Model):
         from django.utils import timezone
 
         days = (self.coverage_ends_on - timezone.localdate()).days
-        if days < 0:
+        if days <= 0:
             return "EXPIRED"
         if days <= 30:
             return "DUE_SOON"
@@ -155,7 +203,7 @@ class Tenant(models.Model):
         """
         from django.utils import timezone
 
-        if self.is_illustration:
+        if self.family_is_illustration:
             return "EXEMPT"
         if self.billing_hold:
             return "ON_HOLD"
@@ -165,8 +213,8 @@ class Tenant(models.Model):
                 return "TRIAL_EXPIRED"
             return "TRIAL_ENDING" if left <= 5 else "TRIAL"
         days = self.days_to_renewal
-        if days < 0:
-            return "EXPIRED" if days <= -10 else "GRACE"
+        if days <= 0:
+            return "EXPIRED"
         return "ACTIVE" if days > 30 else "DUE_SOON"
 
 

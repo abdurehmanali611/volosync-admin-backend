@@ -1055,6 +1055,8 @@ class BranchCreateView(APIView):
             # borrowing another plan's amount.
             setup_fee=setup if setup is not None else Decimal("0.00"),
             parent=parent,
+            is_illustration=parent.family_is_illustration,
+            logo_url=parent.family_logo_url,
             subscription_expires_on=timezone.localdate() + timedelta(days=365),
         )
 
