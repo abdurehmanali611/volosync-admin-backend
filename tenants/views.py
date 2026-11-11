@@ -977,11 +977,15 @@ class BranchCreateView(APIView):
 
     @require_platform_admin
     def get(self, request, pk):
-        parent = Tenant.objects.filter(pk=pk).first()
-        if not parent:
+        member = Tenant.objects.filter(pk=pk).first()
+        if not member:
             return Response({"errors": {"message": "Not found."}}, status=404)
+        # No company root: every member of the family is a branch. The record
+        # created with the tenant is the main branch until another is promoted,
+        # and stays on the list as a satellite afterwards.
+        root = member.family_root
         branches = (
-            Tenant.objects.filter(parent=parent)
+            Tenant.objects.filter(Q(pk=root.pk) | Q(parent=root))
             .annotate(staff_count=Count("staff", distinct=True))
             .order_by("-is_main", "name")
         )
@@ -990,7 +994,8 @@ class BranchCreateView(APIView):
                 "data": [
                     {
                         **TenantSerializer(branch).data,
-                        "is_branch": True,
+                        "is_branch": branch.parent_id is not None,
+                        "is_root": branch.pk == root.pk,
                         "staff_count": branch.staff_count,
                     }
                     for branch in branches
