@@ -350,7 +350,8 @@ class TenantDetailView(APIView):
             ).exists(),
             "counts": {
                 "staff": tenant.staff.count(),
-                "branches": tenant.branches.count(),
+                # No company root: the first-created record is a branch too.
+                "branches": len(family),
                 "lots": lots.count(),
                 "payments": tenant.subscription_payments.count(),
                 "setup_payments": tenant.setup_payments.count(),
@@ -1005,9 +1006,12 @@ class BranchCreateView(APIView):
 
     @require_platform_admin
     def post(self, request, pk):
-        parent = Tenant.objects.filter(pk=pk).first()
-        if not parent:
+        member = Tenant.objects.filter(pk=pk).first()
+        if not member:
             return Response({"errors": {"message": "Not found."}}, status=404)
+        # A new branch always joins the family at its first-created record, no
+        # matter which member the console opened the form from.
+        root = member.family_root
 
         name = (request.data.get("name") or "").strip()
         tin = (request.data.get("tin") or "").strip()
@@ -1015,7 +1019,7 @@ class BranchCreateView(APIView):
             return Response(
                 {"errors": {"message": "Branch name and TIN are required."}}, status=400
             )
-        if tin == parent.tin:
+        if tin == root.tin:
             return Response(
                 {"errors": {"message": "A branch must have its own TIN."}}, status=400
             )
@@ -1029,17 +1033,17 @@ class BranchCreateView(APIView):
         module_inventory = (
             truthy(request.data["module_inventory"])
             if "module_inventory" in request.data
-            else parent.module_inventory
+            else root.module_inventory
         )
         module_hr = (
             truthy(request.data["module_hr"])
             if "module_hr" in request.data
-            else parent.module_hr
+            else root.module_hr
         )
         sales_role_enabled = (
             truthy(request.data["sales_role_enabled"])
             if "sales_role_enabled" in request.data
-            else parent.sales_role_enabled
+            else root.sales_role_enabled
         )
         _plan, yearly, setup = fees_for_modules(
             module_inventory, module_hr, sales_role_enabled
@@ -1050,7 +1054,7 @@ class BranchCreateView(APIView):
             tin=tin,
             phone=request.data.get("phone", ""),
             address=request.data.get("address", ""),
-            vat_rate=parent.vat_rate,
+            vat_rate=root.vat_rate,
             module_inventory=module_inventory,
             module_hr=module_hr,
             sales_role_enabled=sales_role_enabled,
@@ -1059,9 +1063,9 @@ class BranchCreateView(APIView):
             # zero so the console shows its missing-fee warning instead of
             # borrowing another plan's amount.
             setup_fee=setup if setup is not None else Decimal("0.00"),
-            parent=parent,
-            is_illustration=parent.family_is_illustration,
-            logo_url=parent.family_logo_url,
+            parent=root,
+            is_illustration=root.family_is_illustration,
+            logo_url=root.family_logo_url,
             subscription_expires_on=timezone.localdate() + timedelta(days=365),
         )
 
